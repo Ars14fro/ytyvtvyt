@@ -449,6 +449,10 @@
             grandmaster: { name: "Гроссмейстер", description: "Собрать 20 любых достижений.", icon: "gem" },
             new_year_new_me: { name: "Новый год, новый я", description: "Завершить тренировку 1 или 2 января.", icon: "sparkles" },
             beta_tester: { name: "Бета-тестер", description: "Вы нашли это секретное достижение!", icon: "bug" },
+            century_club: { name: "Клуб 100", description: "Завершить 100 тренировок.", icon: "award" },
+            early_bird: { name: "Ранняя пташка", description: "Начать тренировку до 6:00 утра.", icon: "bird" },
+            restless: { name: "Неутомимый", description: "Суммарное время тренировок превысило 100 часов.", icon: "flame" },
+            heavy_lifter: { name: "Богатырь", description: "Поднять 20,000 кг за одну тренировку.", icon: "mountain" },
             flex_code_elite: { name: "FlexCode Elite", description: "Получить все остальные достижения.", icon: "star" },
         };
         const AchievementEngine = {
@@ -529,6 +533,24 @@
                     condition: () => true // Срабатывает всегда при сохранении
                 },
                 // --- Триггер: onSettingsChange ---
+                warm_up: { trigger: 'onWorkoutComplete', condition: ({ history }) => history.reduce((acc, curr) => acc + (curr.sets || 0), 0) >= 50 },
+                hat_trick: { trigger: 'onWorkoutComplete', condition: ({ history }) => calculateStreak(history) >= 3 },
+                work_week: { trigger: 'onWorkoutComplete', condition: ({ history }) => calculateStreak(history) >= 5 },
+                habit_formed: { trigger: 'onWorkoutComplete', condition: ({ history }) => calculateStreak(history) >= 21 },
+                century_club: { trigger: 'onWorkoutComplete', condition: ({ history }) => history.length >= 100 },
+                restless: { trigger: 'onWorkoutComplete', condition: ({ history }) => history.reduce((acc, curr) => acc + (curr.duration || 0), 0) >= 360000 },
+                trucker: { trigger: 'onWorkoutComplete', condition: ({ workoutResult, programs }) => { const p = programs.find(p => p.id === workoutResult.programId); if (!p) return false; let v = 0; workoutResult.completedSets.forEach(s => { const e = p.exercises.find(ex => ex.id === s.exerciseId); if (e) v += calculateTrainingVolume(e); }); return v >= 5000; } },
+                locomotive: { trigger: 'onWorkoutComplete', condition: ({ workoutResult, programs }) => { const p = programs.find(p => p.id === workoutResult.programId); if (!p) return false; let v = 0; workoutResult.completedSets.forEach(s => { const e = p.exercises.find(ex => ex.id === s.exerciseId); if (e) v += calculateTrainingVolume(e); }); return v >= 10000; } },
+                heavy_lifter: { trigger: 'onWorkoutComplete', condition: ({ workoutResult, programs }) => { const p = programs.find(p => p.id === workoutResult.programId); if (!p) return false; let v = 0; workoutResult.completedSets.forEach(s => { const e = p.exercises.find(ex => ex.id === s.exerciseId); if (e) v += calculateTrainingVolume(e); }); return v >= 20000; } },
+                bodyweight_master: { trigger: 'onWorkoutComplete', condition: ({ workoutResult, programs }) => { const p = programs.find(p => p.id === workoutResult.programId); if (!p) return false; let v = 0; workoutResult.completedSets.forEach(s => { const e = p.exercises.find(ex => ex.id === s.exerciseId); if (e) v += calculateTrainingVolume(e); }); return v === 0 && workoutResult.completedSets.length > 0; } },
+                early_bird: { trigger: 'onWorkoutComplete', condition: () => new Date().getHours() < 6 },
+                night_owl: { trigger: 'onWorkoutComplete', condition: () => new Date().getHours() >= 23 || new Date().getHours() < 4 },
+                lunch_break: { trigger: 'onWorkoutComplete', condition: () => new Date().getHours() >= 12 && new Date().getHours() <= 14 },
+                sprinter: { trigger: 'onWorkoutComplete', condition: ({ workoutResult }) => workoutResult.duration < 20 * 60 && workoutResult.sets >= 3 },
+                new_year_new_me: { trigger: 'onWorkoutComplete', condition: () => { const d = new Date(); return d.getMonth() === 0 && (d.getDate() === 1 || d.getDate() === 2); } },
+                no_pauses: { trigger: 'onWorkoutComplete', condition: ({ workoutResult }) => workoutResult.pauses === 0 && workoutResult.duration > 300 },
+                editor_master: { trigger: 'onProgramSave', condition: ({ programs }) => programs && programs.some(p => p.exercises && p.exercises.length >= 7) },
+                versatile: { trigger: 'onProgramSave', condition: ({ programs }) => programs && programs.length >= 3 },
                 full_control: {
                     trigger: 'onSettingsChange',
                     condition: () => true // Срабатывает всегда при изменении
@@ -622,6 +644,14 @@
                 [523.25, 659.25, 783.99].forEach((freq, i) => {
                     setTimeout(() => this.playTone(freq, 'sine', 0.2, 0.3), i * 150);
                 });
+            },
+            speak(text) {
+                if (!window.speechSynthesis) return;
+                window.speechSynthesis.cancel();
+                const msg = new SpeechSynthesisUtterance(text);
+                msg.lang = 'ru-RU';
+                msg.rate = 1.1;
+                window.speechSynthesis.speak(msg);
             }
         };
 
@@ -644,16 +674,16 @@
 
         const generateId = () => Math.random().toString(36).substr(2, 9);
 
-        const calculateTrainingVolume = (exercise) => {
-            if (!exercise.weight || exercise.type === 'time') return 0;
-
-            const weight = parseFloat(exercise.weight);
-            const reps = exercise.reps.split('-')[0]; // Берем минимальное количество повторений
-            const sets = exercise.sets || 1;
-
+        const calculateTrainingVolume = (exercise, setRecord = null) => {
+            const w = setRecord?.weight || exercise.weight;
+            const r = setRecord?.reps || exercise.reps;
+            const t = setRecord?.type || exercise.type;
+            if (!w || t === 'time') return 0;
+            const weight = parseFloat(w);
+            let reps = r === 'Max' ? 10 : String(r).split('-')[0];
+            // Считаем объем строго для 1 подхода (так как функция вызывается внутри цикла по всем подходам)
             if (isNaN(weight) || isNaN(reps)) return 0;
-
-            return weight * parseInt(reps) * sets;
+            return weight * parseInt(reps);
         };
 
         const getGreeting = () => {
@@ -680,6 +710,7 @@
             for (let i = 0; i < 365; i++) {
                 const dateStr = currentDate.toDateString();
                 const hasWorkout = sortedHistory.some(h => new Date(h.date).toDateString() === dateStr);
+if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); continue; }
 
                 if (hasWorkout) {
                     streak++;
@@ -692,58 +723,69 @@
             return streak;
         };
         const calculateProgression = (program, history) => {
-            if (!history || history.length === 0) {
-                return program; // Нет истории - нет прогрессии
-            }
+            if (!history || history.length === 0) return program;
+            const relevantHistory = history.filter(h => h.programId === program.id);
+            if (relevantHistory.length === 0) return program;
 
-            const relevantHistory = history.filter(h => h.programId === program.id)
-                .sort((a, b) => new Date(a.date) - new Date(b.date));
-
-            if (relevantHistory.length === 0) {
-                return program;
-            }
-
-            const newProgram = JSON.parse(JSON.stringify(program)); // Глубокое копирование
+            const newProgram = JSON.parse(JSON.stringify(program));
 
             newProgram.exercises.forEach(exercise => {
-                if (!exercise.progression) {
-                    return; // У этого упражнения нет правил прогрессии
-                }
-
+                if (!exercise.progression) return;
                 const { type, increment, frequency } = exercise.progression;
-                let numIncrements = 0;
 
-                if (frequency === 'workout') {
-                    numIncrements = relevantHistory.length;
-                } else if (frequency === 'week') {
-                    const firstWorkoutDate = new Date(relevantHistory[0].date);
-                    const now = new Date();
-                    const weeksPassed = (now - firstWorkoutDate) / (1000 * 60 * 60 * 24 * 7);
-                    numIncrements = Math.floor(weeksPassed);
-                }
-
-                if (numIncrements <= 0) {
-                    return;
-                }
-
-                if (type === 'weight' && exercise.weight) {
-                    const baseWeight = parseFloat(exercise.weight.replace('kg', ''));
-                    if (!isNaN(baseWeight)) {
-                        const newWeight = baseWeight + (increment * numIncrements);
-                        exercise.weight = `${newWeight}kg`;
+                const allPastSessions = [];
+                relevantHistory.forEach(h => {
+                    if (h.completedSets) {
+                        const sets = h.completedSets.filter(s => s.exerciseId === exercise.id);
+                        if (sets.length > 0) allPastSessions.push({ date: h.date, sets });
                     }
-                } else if (type === 'reps') {
-                    const baseReps = parseInt(exercise.reps);
-                    if (!isNaN(baseReps)) {
-                        const newReps = baseReps + (increment * numIncrements);
-                        exercise.reps = String(newReps);
-                    } else if (exercise.reps === 'Max') {
-                        // Если было "Max", начинаем считать с 1
-                        exercise.reps = `${1 + (increment * numIncrements)}`;
+                });
+
+                if (allPastSessions.length === 0) return;
+
+                const lastSession = allPastSessions[allPastSessions.length - 1];
+                const lastSets = lastSession.sets;
+
+                let lastWeight = parseFloat(String(lastSets[0].weight).replace(/[^0-9.]/g, ''));
+                if (isNaN(lastWeight)) lastWeight = parseFloat(String(exercise.weight).replace(/[^0-9.]/g, '')) || 0;
+
+                let lastReps = parseInt(String(lastSets[0].reps).split('-')[0]);
+                if (isNaN(lastReps)) lastReps = parseInt(String(exercise.reps).split('-')[0]) || 0;
+
+                exercise.hasProgression = false;
+
+                if (type === 'double') {
+                    const targetReps = parseInt(String(exercise.reps).split('-')[1] || exercise.reps);
+                    const isSuccess = lastSets.length >= exercise.sets && lastSets.every(s => parseInt(s.reps) >= targetReps);
+
+                    if (isSuccess) {
+                        exercise.weight = `${lastWeight + increment}kg`;
+                        exercise.progressionText = `+${increment}кг (Цель взята!)`;
+                        exercise.hasProgression = true;
+                    } else {
+                        exercise.weight = `${lastWeight}kg`;
+                        exercise.progressionText = `Удержание веса (цель не взята)`;
                     }
+                } else if (type === 'weight') {
+                    let shouldIncrease = true;
+                    if (frequency === 'week' && allPastSessions.length > 1) {
+                        const lastDate = new Date(lastSession.date);
+                        const diffDays = (new Date() - lastDate) / (1000 * 60 * 60 * 24);
+                        if (diffDays < 5) shouldIncrease = false;
+                    }
+                    if (shouldIncrease) {
+                        exercise.weight = `${lastWeight + increment}kg`;
+                        exercise.progressionText = `+${increment}кг`;
+                        exercise.hasProgression = true;
+                    } else {
+                        exercise.weight = `${lastWeight}kg`;
+                    }
+                } else if (type === 'reps' && exercise.reps !== 'Max') {
+                    exercise.reps = String(lastReps + increment);
+                    exercise.progressionText = `+${increment} повт`;
+                    exercise.hasProgression = true;
                 }
             });
-
             return newProgram;
         };
 
@@ -758,7 +800,8 @@
                 countdownDuration: 3,
                 showRestTime: true,
                 enableVibration: 'vibration' in navigator,
-                showEquipmentIcons: true
+                showEquipmentIcons: true,
+                voiceAssistant: false
             },
             notifications: {
                 workoutComplete: true,
@@ -785,13 +828,14 @@
                         "equipment": "Штанга",
                         "type": "reps",
                         "sets": 4,
-                        "reps": "8-10",
+                        "reps": "8-12",
                         "weight": "80kg",
                         "restAfter": 120,
+                        "rpe": "8",
+                        "tempo": "3-1-1-0",
                         "progression": {
-                            "type": "weight",
-                            "increment": 2.5,
-                            "frequency": "week"
+                            "type": "double",
+                            "increment": 2.5
                         }
                     },
                     {
@@ -835,6 +879,8 @@
                         "sets": 4,
                         "reps": "Max",
                         "restAfter": 120,
+                        "rpe": "9",
+                        "tempo": "2-0-1-1",
                         "progression": {
                             "type": "reps",
                             "increment": 1,
@@ -844,6 +890,7 @@
                     {
                         "id": "ex_5",
                         "name": "Тяга в наклоне",
+                        "supersetId": "super_1",
                         "description": "Спина прямая, тянуть к поясу",
                         "equipment": "Штанга",
                         "type": "reps",
@@ -855,6 +902,7 @@
                     {
                         "id": "ex_6",
                         "name": "Молотковые сгибания",
+                        "supersetId": "super_1",
                         "description": "Локти прижаты к корпусу",
                         "equipment": "Гантели",
                         "type": "reps",
@@ -868,7 +916,7 @@
             {
                 "id": "prog_3",
                 "scheduleName": "Ноги и Плечи",
-                "dayOfWeek": "Friday",
+                "dayOfWeek": "Тренировка А (Цикл)",
                 "globalRestTime": 90,
                 "color": "#f59e0b",
                 "description": "Комплексная тренировка нижней части тела и плеч",
@@ -933,7 +981,7 @@
                             </div>
                             <button
                                 onClick={() => {
-                                    localStorage.removeItem('flexcode_programs');
+                                    localStorage.clear();
                                     window.location.reload();
                                 }}
                                 className="px-6 py-3 bg-red-600 hover:bg-red-700 rounded-xl font-bold transition-colors"
@@ -1012,15 +1060,19 @@
         const Modal = ({ isOpen, onClose, title, children, size = 'md' }) => {
             const [animate, setAnimate] = useState(false);
 
-            useEffect(() => {
+                        useEffect(() => {
+                let timer;
                 if (isOpen) {
                     setAnimate(true);
                     document.body.style.overflow = 'hidden';
                 } else {
-                    const timer = setTimeout(() => setAnimate(false), 300);
+                    timer = setTimeout(() => setAnimate(false), 300);
                     document.body.style.overflow = '';
-                    return () => clearTimeout(timer);
                 }
+                return () => {
+                    if (timer) clearTimeout(timer);
+                    document.body.style.overflow = ''; // Гарантированная разблокировка скролла при закрытии/удалении модалки
+                };
             }, [isOpen]);
 
             if (!isOpen && !animate) return null;
@@ -1180,9 +1232,19 @@
                                         <Icon name={equipmentIcon} size={16} className="text-indigo-400" />
                                     </div>
                                 )}
-                                <div>
-                                    <h4 className="font-bold text-white">{exercise.name}</h4>
-                                    <p className="text-xs text-gray-500">{exercise.equipment}</p>
+                                                                <div className="flex-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <h4 className="font-bold text-white">
+                                            {exercise.name}
+                                            {exercise.supersetId && <span className="ml-2 text-[10px] bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded-full border border-purple-500/30 uppercase tracking-wider">🔗 Суперсет</span>}
+                                        </h4>
+                                        {exercise.hasProgression && (
+                                            <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] font-bold rounded-full uppercase tracking-wider border border-green-500/30 shadow-[0_0_8px_rgba(34,197,94,0.2)]">
+                                                {exercise.progressionText} 📈
+                                            </span>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-gray-500 mt-0.5">{exercise.equipment}</p>
                                 </div>
                             </div>
 
@@ -1205,6 +1267,18 @@
                                     <Icon name="clock" size={14} className="text-gray-500" />
                                     <span className="text-white">{exercise.restAfter || 60}с отдых</span>
                                 </div>
+                                {exercise.rpe && (
+                                    <div className="flex items-center gap-1 ml-2">
+                                        <Icon name="target" size={14} className="text-red-400" />
+                                        <span className="text-red-400 font-medium">RPE {exercise.rpe}</span>
+                                    </div>
+                                )}
+                                {exercise.tempo && (
+                                    <div className="flex items-center gap-1 ml-2">
+                                        <Icon name="activity" size={14} className="text-blue-400" />
+                                        <span className="text-blue-400 font-medium">Темп {exercise.tempo}</span>
+                                    </div>
+                                )}
                             </div>
                         </div>
 
@@ -1294,7 +1368,11 @@
 
         // 2. НАСТРОЙКИ ПЛЕЕРА
         const PlayerSettingsModal = ({ isOpen, onClose, settings, onSettingsChange }) => {
-            const [localSettings, setLocalSettings] = useState(settings);
+            const [localSettings, setLocalSettings] = useState({ ...DEFAULT_SETTINGS.player, ...settings });
+
+            useEffect(() => {
+                if (isOpen) setLocalSettings({ ...DEFAULT_SETTINGS.player, ...settings });
+            }, [isOpen, settings]);
 
             const handleSave = () => {
                 onSettingsChange(localSettings);
@@ -1443,10 +1521,26 @@
                                                 onChange={(e) => setLocalSettings(s => ({ ...s, enableVibration: e.target.checked }))}
                                                 className="sr-only peer"
                                             />
-                                            <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                                                                                        <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
                                         </label>
                                     </div>
                                 )}
+
+                                <div className="flex items-center justify-between p-3 bg-surface/30 rounded-lg mt-3">
+                                    <div>
+                                        <p className="text-white font-medium">Голосовой ассистент 🎙️</p>
+                                        <p className="text-xs text-gray-500">Озвучивать фазы и названия упражнений</p>
+                                    </div>
+                                    <label className="relative inline-flex items-center cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={localSettings.voiceAssistant}
+                                            onChange={(e) => setLocalSettings(s => ({ ...s, voiceAssistant: e.target.checked }))}
+                                            className="sr-only peer"
+                                        />
+                                        <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                                    </label>
+                                </div>
                             </div>
                         </div>
 
@@ -1460,7 +1554,9 @@
         };
 
         // 3. WORKOUT PLAYER (РАСШИРЕННАЯ ВЕРСИЯ)
-        const WorkoutPlayer = ({ workout, onClose, onComplete, settings = DEFAULT_SETTINGS.player, onSettingsChange }) => {
+        const WorkoutPlayer = ({ workout, onClose, onComplete, settings = DEFAULT_SETTINGS.player, onSettingsChange, history = [] }) => {
+            const [actualWeight, setActualWeight] = useState('');
+            const [actualReps, setActualReps] = useState('');
             // States
             const [exIndex, setExIndex] = useState(0);
             const [setIndex, setSetIndex] = useState(1);
@@ -1471,15 +1567,40 @@
             const [stats, setStats] = useState({ totalTime: 0, completedSets: 0 });
             const [showRestAdvice, setShowRestAdvice] = useState('');
             const [completedSets, setCompletedSets] = useState([]);
-            const [showSettings, setShowSettings] = useState(false);
+                        const [showSettings, setShowSettings] = useState(false);
 
             // Refs
+            const wakeLockRef = useRef(null);
             const timerRef = useRef(null);
             const startTimeRef = useRef(Date.now());
             const progressBarRef = useRef(null);
+            const pausedTimeRef = useRef(0);
+            const pauseStartRef = useRef(null);
 
             const exercise = useMemo(() => workout.exercises[exIndex], [exIndex, workout]);
             const totalSets = exercise?.sets || 3;
+
+            useEffect(() => {
+                if (exercise) {
+                    const w = String(exercise.weight || '').replace(/[^0-9.]/g, '');
+                    setActualWeight(w);
+                    const r = String(exercise.reps || '').split('-')[0];
+                    setActualReps(r === 'Max' ? '' : r);
+                }
+            }, [exercise]); // Убрали setIndex, чтобы вес наследовался на следующий подход
+
+            const prevSetRecord = useMemo(() => {
+                if (!history || history.length === 0) return null;
+                for (let i = history.length - 1; i >= 0; i--) {
+                    if (history[i].completedSets) {
+                        const prevSets = history[i].completedSets.filter(s => s.exerciseId === exercise?.id);
+                        if (prevSets.length > 0) {
+                            return prevSets.find(s => s.setNumber === setIndex) || null;
+                        }
+                    }
+                }
+                return null;
+            }, [history, exercise, setIndex]);
 
             // Расчет прогресса
             const totalExercises = workout.exercises.length;
@@ -1498,14 +1619,28 @@
 
             const workoutProgress = totalWorkoutSets > 0 ? (completedWorkoutSets / totalWorkoutSets) * 100 : 0;
 
-            // Инициализация
+                        // Инициализация и блокировка затухания экрана (Wake Lock)
             useEffect(() => {
-                AudioEngine.init();
                 startCountdown();
+                if (settings.enableVibration && 'vibrate' in navigator) navigator.vibrate(100);
 
-                if (settings.enableVibration && 'vibrate' in navigator) {
-                    navigator.vibrate(100);
-                }
+                const requestWakeLock = async () => {
+                    if ('wakeLock' in navigator) {
+                        try {
+                            wakeLockRef.current = await navigator.wakeLock.request('screen');
+                        } catch (err) {
+                            console.log('Wake Lock error:', err);
+                        }
+                    }
+                };
+                requestWakeLock();
+
+                return () => {
+                    if (wakeLockRef.current) {
+                        wakeLockRef.current.release();
+                        wakeLockRef.current = null;
+                    }
+                };
             }, []);
 
             // Основной таймер
@@ -1575,12 +1710,18 @@
                 if (newPhase === 'work') {
                     setPhase('work');
                     AudioEngine.playStart();
+                    if (settings.voiceAssistant) AudioEngine.speak(exercise.name);
                     if (exercise.type === 'time') {
                         setTimeLeft(exercise.timer || 60);
                     }
                 } else if (newPhase === 'rest') {
                     setPhase('rest');
                     AudioEngine.playRest();
+                    if (settings.voiceAssistant) {
+                        if (setIndex < totalSets) AudioEngine.speak('Отдых.');
+                        else if (exIndex < workout.exercises.length - 1) AudioEngine.speak('Отдых. Следующее упражнение: ' + workout.exercises[exIndex + 1].name);
+                        else AudioEngine.speak('Отдых перед завершением.');
+                    }
                     setTimeLeft(exercise.restAfter || workout.globalRestTime || 60);
                     setShowRestAdvice('Глубоко дышите, восстановите пульс');
 
@@ -1589,25 +1730,38 @@
                         exerciseId: exercise.id,
                         exerciseName: exercise.name,
                         setNumber: setIndex,
+                        weight: actualWeight ? `${actualWeight}kg` : exercise.weight,
+                        reps: actualReps || String(exercise.reps).split('-')[0],
+                        type: exercise.type,
                         timestamp: new Date().toISOString()
                     }]);
                 }
             };
 
             const handleWorkComplete = () => {
-                if (setIndex < totalSets) {
-                    changePhase('rest');
+                const currentEx = workout.exercises[exIndex];
+                const nextEx = workout.exercises[exIndex + 1];
+
+                if (currentEx.supersetId && nextEx && nextEx.supersetId === currentEx.supersetId) {
+                    setExIndex(prev => prev + 1);
+                    changePhase('work'); // Сразу переходим к следующему упражнению суперсета
                 } else {
-                    if (exIndex < workout.exercises.length - 1) {
-                        changePhase('rest');
-                    } else {
-                        finishWorkout();
-                    }
+                    changePhase('rest');
                 }
             };
 
-            const handleRestComplete = () => {
-                if (setIndex < totalSets) {
+                        const handleRestComplete = () => {
+                const currentEx = workout.exercises[exIndex];
+                let firstExOfSuperset = exIndex;
+                
+                if (currentEx.supersetId) {
+                    while (firstExOfSuperset > 0 && workout.exercises[firstExOfSuperset - 1].supersetId === currentEx.supersetId) {
+                        firstExOfSuperset--;
+                    }
+                }
+
+                if (setIndex < (workout.exercises[firstExOfSuperset].sets || 1)) {
+                    setExIndex(firstExOfSuperset);
                     setSetIndex(prev => prev + 1);
                     startCountdown();
                 } else {
@@ -1651,10 +1805,11 @@
             };
 
             const finishWorkout = () => {
+setCompletedSets(prev => { const isSaved = prev.some(s => s.exerciseId === exercise.id && s.setNumber === setIndex); return isSaved ? prev : [...prev, { exerciseId: exercise.id, exerciseName: exercise.name, setNumber: setIndex, weight: actualWeight ? `${actualWeight}kg` : exercise.weight, reps: actualReps || String(exercise.reps).split('-')[0], type: exercise.type, timestamp: new Date().toISOString() }]; });
                 setPhase('complete');
                 AudioEngine.playComplete();
                 onComplete({
-                    duration: Math.floor((Date.now() - startTimeRef.current) / 1000),
+                    duration: Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000),
                     sets: completedSets.length,
                     completedSets,
                     workoutName: workout.scheduleName
@@ -1674,6 +1829,7 @@
             };
 
             const togglePause = () => {
+                if (!isPaused) { pauseStartRef.current = Date.now(); } else if (pauseStartRef.current) { pausedTimeRef.current += Date.now() - pauseStartRef.current; pauseStartRef.current = null; }
                 setIsPaused(!isPaused);
                 AudioEngine.playClick();
             };
@@ -1745,16 +1901,34 @@
                                 )}
                             </div>
 
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-                                <div className="bg-surface/50 border border-white/5 p-4 rounded-2xl text-center hover:bg-surface/70 transition-colors">
-                                    <p className="text-xs text-gray-500 uppercase mb-1">Вес</p>
-                                    <p className="text-xl font-bold text-white">{exercise.weight || '--'}</p>
+                            <div className="grid grid-cols-3 md:grid-cols-6 gap-3 mb-6">
+                                {exercise.rpe && (
+                                    <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-2xl text-center">
+                                        <p className="text-xs text-red-400/70 uppercase mb-1">Усилие (RPE)</p>
+                                        <p className="text-xl font-bold text-red-400">{exercise.rpe}</p>
+                                    </div>
+                                )}
+                                {exercise.tempo && (
+                                    <div className="bg-blue-500/10 border border-blue-500/20 p-4 rounded-2xl text-center">
+                                        <p className="text-xs text-blue-400/70 uppercase mb-1">Темп</p>
+                                        <p className="text-xl font-bold text-blue-400">{exercise.tempo}</p>
+                                    </div>
+                                )}
+                                <div className="bg-surface/50 border border-white/5 p-4 rounded-2xl text-center hover:bg-surface/70 transition-colors group cursor-text">
+                                    <p className="text-xs text-gray-500 uppercase mb-1">Вес (кг)</p>
+                                    {exercise.type === 'time' || (exercise.equipment === 'Собственный вес' && !exercise.weight) ? (
+                                        <p className="text-xl font-bold text-white">{exercise.weight || '--'}</p>
+                                    ) : (
+                                        <input type="number" value={actualWeight} onChange={(e) => setActualWeight(e.target.value)} className="w-full bg-transparent text-xl font-bold text-white text-center outline-none border-b border-transparent focus:border-indigo-500 transition-colors" placeholder={String(exercise.weight || '').replace(/[^0-9.]/g, '')} onClick={(e)=>e.target.select()} />
+                                    )}
                                 </div>
-                                <div className="bg-surface/50 border border-white/5 p-4 rounded-2xl text-center hover:bg-surface/70 transition-colors">
-                                    <p className="text-xs text-gray-500 uppercase mb-1">Повторы</p>
-                                    <p className="text-xl font-bold text-white">
-                                        {exercise.type === 'time' ? `${exercise.timer}с` : exercise.reps}
-                                    </p>
+                                <div className="bg-surface/50 border border-white/5 p-4 rounded-2xl text-center hover:bg-surface/70 transition-colors group cursor-text">
+                                    <p className="text-xs text-gray-500 uppercase mb-1">{exercise.type === 'time' ? 'Время (с)' : 'Повторы'}</p>
+                                    {exercise.type === 'time' ? (
+                                        <p className="text-xl font-bold text-white">{exercise.timer}с</p>
+                                    ) : (
+                                        <input type="number" value={actualReps} onChange={(e) => setActualReps(e.target.value)} className="w-full bg-transparent text-xl font-bold text-white text-center outline-none border-b border-transparent focus:border-indigo-500 transition-colors" placeholder={String(exercise.reps || '').split('-')[0]} onClick={(e)=>e.target.select()} />
+                                    )}
                                 </div>
                                 <div className="bg-surface/50 border border-white/5 p-4 rounded-2xl text-center hover:bg-surface/70 transition-colors">
                                     <p className="text-xs text-gray-500 uppercase mb-1">Подходы</p>
@@ -1764,6 +1938,11 @@
                                     <p className="text-xs text-gray-500 uppercase mb-1">Отдых</p>
                                     <p className="text-xl font-bold text-white">{exercise.restAfter || workout.globalRestTime}с</p>
                                 </div>
+                                {prevSetRecord && (
+                                    <div className="col-span-3 md:col-span-6 bg-indigo-500/10 rounded-xl p-3 text-center border border-indigo-500/20">
+                                        <p className="text-sm text-gray-400">Прошлая треня (Подход {setIndex}): <span className="text-indigo-300 font-bold">{prevSetRecord.weight} × {prevSetRecord.reps}</span></p>
+                                    </div>
+                                )}
                             </div>
 
                             {/* Список упражнений */}
@@ -1813,12 +1992,59 @@
                                         <div className="mt-4 text-center">
                                             <p className="text-lg text-emerald-400 font-medium">{showRestAdvice}</p>
                                             {settings.showRestTime && (
-                                                <p className="text-sm text-gray-500 mt-1">
+                                                <p className="text-sm text-gray-500 mt-1 mb-4">
                                                     Отдых: {exercise.restAfter || workout.globalRestTime} секунд
                                                 </p>
                                             )}
                                         </div>
                                     )}
+
+                                    {/* БЛОК РЕДАКТИРОВАНИЯ ВО ВРЕМЯ ОТДЫХА */}
+                                    <div className="mt-6 bg-surface/80 border border-white/10 p-5 rounded-2xl max-w-sm mx-auto shadow-lg animate-fade-in">
+                                        <h4 className="text-white font-bold mb-4 text-center flex items-center justify-center gap-2">
+                                            <Icon name="edit-3" size={16} className="text-indigo-400" />
+                                            Фактический результат
+                                        </h4>
+                                        <div className="flex gap-4">
+                                            <div className="flex-1">
+                                                <label className="text-xs text-gray-400 uppercase font-bold mb-1 block text-center">Вес (кг)</label>
+                                                <input
+                                                    type="number"
+                                                    className="w-full bg-dark/50 border border-white/10 rounded-xl p-3 text-white text-center text-xl font-bold focus:border-indigo-500 outline-none transition-colors"
+                                                    value={completedSets.length > 0 ? String(completedSets[completedSets.length - 1]?.weight || '').replace(/[^0-9.]/g, '') : ''}
+                                                    onChange={(e) => {
+                                                        const val = e.target.value;
+                                                        setActualWeight(val); // Синхронизируем стейт для следующего подхода!
+                                                        setCompletedSets(prev => {
+                                                            const newSets = [...prev];
+                                                            if(newSets.length > 0) newSets[newSets.length - 1].weight = val ? `${val}kg` : '0kg';
+                                                            return newSets;
+                                                        });
+                                                    }}
+                                                    onClick={(e)=>e.target.select()}
+                                                />
+                                            </div>
+                                            <div className="flex-1">
+                                                <label className="text-xs text-gray-400 uppercase font-bold mb-1 block text-center">{exercise.type === 'time' ? 'Время (с)' : 'Повторы'}</label>
+                                                <input
+                                                    type="number"
+                                                    className="w-full bg-dark/50 border border-white/10 rounded-xl p-3 text-white text-center text-xl font-bold focus:border-indigo-500 outline-none transition-colors"
+                                                    value={completedSets.length > 0 ? completedSets[completedSets.length - 1]?.reps || '' : ''}
+                                                    onChange={(e) => {
+                                                        const val = e.target.value;
+                                                        setActualReps(val); // Синхронизируем стейт для следующего подхода!
+                                                        setCompletedSets(prev => {
+                                                            const newSets = [...prev];
+                                                            if(newSets.length > 0) newSets[newSets.length - 1].reps = val;
+                                                            return newSets;
+                                                        });
+                                                    }}
+                                                    onClick={(e)=>e.target.select()}
+                                                />
+                                            </div>
+                                        </div>
+                                        <p className="text-[10px] text-gray-500 text-center mt-3 uppercase tracking-wider">Эти данные сохранятся в историю</p>
+                                    </div>
                                 </div>
                             ) : exercise.type === 'time' ? (
                                 <div className="text-center">
@@ -1917,8 +2143,12 @@
             const [timeRange, setTimeRange] = useState('week');
             const chartRef = useRef(null);
             const volumeChartRef = useRef(null);
-            const [chartInstance, setChartInstance] = useState(null);
+                        const [chartInstance, setChartInstance] = useState(null);
             const [volumeChartInstance, setVolumeChartInstance] = useState(null);
+
+            // Защита от пустого массива программ
+            const safePrograms = programs || [];
+            const safeHistory = history || [];
 
             // Расчет статистики
             const totalWorkouts = history.length;
@@ -1929,14 +2159,14 @@
 
             // Расчет тренировочного объема
             const trainingVolume = useMemo(() => {
-                let volume = 0;
-                history.forEach(record => {
-                    const program = programs.find(p => p.scheduleName === record.programName);
+                                let volume = 0;
+                safeHistory.forEach(record => {
+                    const program = safePrograms.find(p => p.scheduleName === record.programName);
                     if (program && record.completedSets) {
                         record.completedSets.forEach(set => {
                             const exercise = program.exercises.find(e => e.id === set.exerciseId);
                             if (exercise) {
-                                volume += calculateTrainingVolume(exercise);
+                                volume += calculateTrainingVolume(exercise, set);
                             }
                         });
                     }
@@ -2095,7 +2325,7 @@
                         h.completedSets.forEach(set => {
                             const exercise = program.exercises.find(e => e.id === set.exerciseId);
                             if (exercise) {
-                                volume += calculateTrainingVolume(exercise);
+                                volume += calculateTrainingVolume(exercise, set);
                             }
                         });
                         return volume;
@@ -2296,7 +2526,7 @@
         };
 
         // 5. КОМПОНЕНТ РАСПИСАНИЯ
-        const ScheduleView = ({ programs, onSelectProgram, onAddProgram, onDeleteProgram }) => {
+        const ScheduleView = ({ programs, onSelectProgram, onDeleteProgram }) => {
             const currentDay = getCurrentDay();
             const todayProgram = programs.find(p => p.dayOfWeek === currentDay);
             const [selectedDay, setSelectedDay] = useState(currentDay);
@@ -2305,11 +2535,14 @@
             // Группировка программ по дням
             const programsByDay = useMemo(() => {
                 const grouped = {};
-                WEEK_DAYS.forEach(day => {
-                    grouped[day.id] = programs.filter(p => p.dayOfWeek === day.id);
+                programs.forEach(p => {
+                    if (!grouped[p.dayOfWeek]) grouped[p.dayOfWeek] = [];
+                    grouped[p.dayOfWeek].push(p);
                 });
                 return grouped;
             }, [programs]);
+            
+            const customDays = useMemo(() => Object.keys(programsByDay).filter(id => !WEEK_DAYS.some(wd => wd.id === id)), [programsByDay]);
 
             const handleAddProgram = (day) => {
                 // Здесь должна быть логика добавления новой программы
@@ -2359,14 +2592,22 @@
                             })}
                         </div>
 
-                        <Button
-                            onClick={() => setShowAddModal(true)}
-                            variant="ghost"
-                            icon="plus"
-                            className="w-full"
-                        >
-                            Добавить тренировку
-                        </Button>
+                                                                    {customDays.length > 0 && (
+                            <div className="mt-6 pt-4 border-t border-white/10">
+                                <h4 className="text-xs text-gray-500 uppercase tracking-widest mb-3">Сплиты / Циклы</h4>
+                                <div className="flex flex-wrap gap-2">
+                                    {customDays.map(dayId => (
+                                        <button 
+                                            key={dayId} 
+                                            onClick={() => setSelectedDay(dayId)}
+                                            className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${selectedDay === dayId ? 'bg-indigo-600 text-white shadow-lg' : 'bg-surface border border-white/10 text-gray-400 hover:text-white'}`}
+                                        >
+                                            {dayId}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </Card>
 
                     {/* Программы выбранного дня */}
@@ -2427,18 +2668,10 @@
                                 ))}
                             </div>
                         ) : (
-                            <Card>
+                                                        <Card>
                                 <div className="text-center py-8">
                                     <Icon name="calendar" size={48} className="text-gray-600 mx-auto mb-3" />
                                     <p className="text-gray-400">Нет тренировок на этот день</p>
-                                    <Button
-                                        onClick={() => setShowAddModal(true)}
-                                        variant="ghost"
-                                        icon="plus"
-                                        className="mt-3"
-                                    >
-                                        Добавить тренировку
-                                    </Button>
                                 </div>
                             </Card>
                         )}
@@ -2448,16 +2681,47 @@
         };
 
         // 6. ДЕТАЛЬНЫЙ ПРОСМОТР ПРОГРАММЫ
-        const ProgramDetailView = ({ program, onClose, onStartWorkout, onEdit }) => {
+        const ProgramDetailView = ({ program, onClose, onStartWorkout, onEdit, reminders, setReminders }) => {
+            const pendingPreWorkout = reminders?.filter(r => r.trigger === 'pre_workout' && r.lastCompleted !== new Date().toDateString()) || [];
             const totalSets = program.exercises.reduce((acc, ex) => acc + (ex.sets || 1), 0);
-            const estimatedDuration = Math.round(program.exercises.reduce((acc, ex) =>
-                acc + (ex.sets * (ex.type === 'time' ? ex.timer : 45) + ex.sets * (ex.restAfter || 60)), 0
+                        const estimatedDuration = Math.round(program.exercises.reduce((acc, ex) =>
+                acc + (ex.sets * (ex.type === 'time' ? ex.timer : 45) + ex.sets * (ex.restAfter || program.globalRestTime || 60)), 0
             ) / 60);
+
+            const handleStartClick = () => {
+                // Инициализируем звук именно по клику пользователя, чтобы iOS/Safari не блокировали его
+                AudioEngine.init();
+                if (AudioEngine.ctx && AudioEngine.ctx.state === 'suspended') {
+                    AudioEngine.ctx.resume();
+                }
+                onStartWorkout(program);
+            };
 
             return (
                 <Modal isOpen={true} onClose={onClose} title={program.scheduleName} size="lg">
                     <div className="space-y-6">
                         {/* Заголовок */}
+                        {pendingPreWorkout.length > 0 && (
+                            <div className="bg-red-500/10 border border-red-500/30 p-4 rounded-xl animate-pulse-slow shadow-[0_0_15px_rgba(239,68,68,0.2)]">
+                                <h4 className="text-red-400 font-bold flex items-center gap-2 mb-2">
+                                    <Icon name="alert-circle" size={18} />
+                                    Требуется прием добавок!
+                                </h4>
+                                <ul className="text-sm text-red-200 mb-3 space-y-1">
+                                    {pendingPreWorkout.map(r => (
+                                        <li key={r.id} className="flex justify-between"><span>• {r.title}</span> <span>{r.dosage}</span></li>
+                                    ))}
+                                </ul>
+                                <Button size="sm" variant="danger" className="w-full" onClick={() => {
+                                    const today = new Date().toDateString();
+                                    setReminders(prev => prev.filter(r => {
+                                        if (r.frequency === 'once' && pendingPreWorkout.find(p => p.id === r.id)) return false;
+                                        return true;
+                                    }).map(r => pendingPreWorkout.find(p => p.id === r.id) ? {...r, lastCompleted: today} : r));
+                                }}>Я всё выпил!</Button>
+                            </div>
+                        )}
+
                         <div>
                             <div className="flex items-center gap-2 mb-2">
                                 <div
@@ -2514,9 +2778,9 @@
                             >
                                 Редактировать
                             </Button>
-                            <Button
+                                                        <Button
                                 variant="primary"
-                                onClick={() => onStartWorkout(program)}
+                                onClick={handleStartClick}
                                 className="flex-1"
                                 icon="play"
                             >
@@ -2561,14 +2825,161 @@
         };
 
         // --- ГЛАВНОЕ ПРИЛОЖЕНИЕ ---
+        // --- МЕНЕДЖЕР ПРОФИЛЕЙ ---
+// --- НАПОМИНАНИЯ (САППЛЕМЕНТЫ) ---
+        const RemindersView = ({ reminders, setReminders }) => {
+            const [isAdding, setIsAdding] = useState(false);
+            const [newReminder, setNewReminder] = useState({ title: '', dosage: '', trigger: 'pre_workout', time: '09:00', frequency: 'daily' });
+
+            const handleAdd = () => {
+                if(!newReminder.title) return;
+                setReminders(prev => [...prev, { ...newReminder, id: generateId(), lastCompleted: null }]);
+                setIsAdding(false);
+                setNewReminder({ title: '', dosage: '', trigger: 'pre_workout', time: '09:00', frequency: 'daily' });
+            };
+
+            const toggleComplete = (id) => {
+                const today = new Date().toDateString();
+                setReminders(prev => prev.filter(r => {
+                    if (r.id === id && r.frequency === 'once' && r.lastCompleted !== today) return false; // Удаляем разовое при ручном клике
+                    return true;
+                }).map(r => r.id === id ? { ...r, lastCompleted: r.lastCompleted === today ? null : today } : r));
+            };
+
+            const today = new Date().toDateString();
+
+            return (
+                <div className="animate-slide-up">
+                    <div className="flex justify-between items-center mb-6">
+                        <div>
+                            <h2 className="text-2xl font-bold text-white">Спортивные добавки</h2>
+                            <p className="text-gray-400">Контроль приема витаминов и спортпита</p>
+                        </div>
+                        <Button onClick={() => setIsAdding(!isAdding)} icon={isAdding ? 'x' : 'plus'} size="sm">{isAdding ? 'Отмена' : 'Добавить'}</Button>
+                    </div>
+
+                    {isAdding && (
+                        <Card className="mb-6 border-indigo-500/30">
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="text-xs text-gray-400 uppercase">Что принимаем?</label>
+                                    <input type="text" placeholder="Например: Креатин" className="w-full bg-dark border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-indigo-500" value={newReminder.title} onChange={e => setNewReminder({...newReminder, title: e.target.value})} />
+                                </div>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="text-xs text-gray-400 uppercase">Дозировка</label>
+                                        <input type="text" placeholder="5г" className="w-full bg-dark border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-indigo-500" value={newReminder.dosage} onChange={e => setNewReminder({...newReminder, dosage: e.target.value})} />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 uppercase">Когда?</label>
+                                        <select className="w-full bg-dark border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-indigo-500 appearance-none" value={newReminder.trigger} onChange={e => setNewReminder({...newReminder, trigger: e.target.value})}>
+                                            <option value="pre_workout">Перед тренировкой</option>
+                                            <option value="post_workout">После тренировки</option>
+                                            <option value="time">По времени</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div className={`grid ${newReminder.trigger === 'time' ? 'grid-cols-2' : 'grid-cols-1'} gap-3 mt-1`}>
+                                    <div>
+                                        <label className="text-xs text-gray-400 uppercase">Частота</label>
+                                        <select className="w-full bg-dark border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-indigo-500 appearance-none" value={newReminder.frequency} onChange={e => setNewReminder({...newReminder, frequency: e.target.value})}>
+                                            <option value="daily">Раз в день</option>
+                                            {newReminder.trigger !== 'time' && <option value="every_workout">Каждую тренировку</option>}
+                                            <option value="once">Разово (удалить после)</option>
+                                        </select>
+                                    </div>
+                                    {newReminder.trigger === 'time' && (
+                                        <div>
+                                            <label className="text-xs text-gray-400 uppercase">Время (ЧЧ:ММ)</label>
+                                            <input type="time" className="w-full bg-dark border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-indigo-500 color-scheme-dark" value={newReminder.time} onChange={e => setNewReminder({...newReminder, time: e.target.value})} />
+                                        </div>
+                                    )}
+                                </div>
+                                <Button onClick={handleAdd} className="w-full" variant="primary">Сохранить напоминание</Button>
+                            </div>
+                        </Card>
+                    )}
+
+                    <div className="space-y-3 pb-20">
+                        {reminders.length === 0 && !isAdding && <p className="text-center text-gray-500 py-10">Нет активных напоминаний</p>}
+                        {reminders.map(r => {
+                            const isDone = r.lastCompleted === today;
+                            return (
+                                <div key={r.id} className={`p-4 rounded-2xl border transition-all duration-300 flex items-center justify-between ${isDone ? 'bg-surface border-green-500/30 opacity-70' : 'bg-red-500/10 border-red-500/30 animate-pulse-slow'}`}>
+                                    <div className="flex items-center gap-4">
+                                        <button onClick={() => toggleComplete(r.id)} className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-colors ${isDone ? 'bg-green-500 border-green-500 text-white' : 'border-red-400 text-transparent hover:bg-red-500/20'}`}>
+                                            <Icon name="check" size={16} />
+                                        </button>
+                                        <div>
+                                            <h4 className={`font-bold ${isDone ? 'text-gray-300 line-through' : 'text-red-400'}`}>{r.title} <span className="text-sm font-normal opacity-70">({r.dosage})</span></h4>
+                                            <p className="text-xs text-gray-500">
+                                                {r.trigger === 'pre_workout' ? '⚡ Перед трени' : r.trigger === 'post_workout' ? '💪 После трени' : `⏰ В ${r.time}`}
+                                                {' • '}
+                                                {r.frequency === 'once' ? 'Разово' : r.frequency === 'every_workout' ? 'Каждый раз' : 'Раз в день'}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <button onClick={() => { if(confirm('Удалить?')) setReminders(prev => prev.filter(x => x.id !== r.id)) }} className="p-2 text-gray-500 hover:text-red-400">
+                                        <Icon name="trash-2" size={16} />
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            );
+        };
+ 
+        const WorkspaceManagerModal = ({ isOpen, onClose, workspaces, activeId, onSwitch, onCreate, onDelete, onRename }) => {
+            const [newName, setNewName] = useState('');
+            const [isCreating, setIsCreating] = useState(false);
+            if (!isOpen) return null;
+            return (
+                <Modal isOpen={isOpen} onClose={onClose} title="Профили (Циклы)" size="sm">
+                    <div className="space-y-4">
+                        <p className="text-sm text-gray-400">Создавайте разные профили, чтобы разделять тренировочные циклы (например: "Сила", "Масса", "Домашняя"). У каждого профиля своя история, статистика и расписание.</p>
+                        <div className="space-y-2">
+                            {workspaces.map(ws => (
+                                <div key={ws.id} className={`flex items-center justify-between p-3 rounded-xl border ${activeId === ws.id ? 'bg-indigo-500/20 border-indigo-500/50' : 'bg-surface border-white/5'}`}>
+                                    <div className="flex-1 cursor-pointer" onClick={() => { onSwitch(ws.id); onClose(); }}>
+                                        <h4 className={`font-bold ${activeId === ws.id ? 'text-indigo-300' : 'text-white'}`}>{ws.name}</h4>
+                                        {activeId === ws.id && <span className="text-xs text-indigo-400">Текущий профиль</span>}
+                                    </div>
+                                    <div className="flex gap-1">
+                                        <button onClick={() => { const nn = prompt('Новое название:', ws.name); if(nn) onRename(ws.id, nn); }} className="p-2 text-gray-400 hover:text-white"><Icon name="edit-2" size={16}/></button>
+                                        {workspaces.length > 1 && (
+                                            <button onClick={() => { if(confirm(`Удалить профиль "${ws.name}" и ВСЮ его историю?`)) onDelete(ws.id); }} className="p-2 text-red-400 hover:text-red-300"><Icon name="trash-2" size={16}/></button>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        {isCreating ? (
+                            <div className="flex gap-2 mt-4">
+                                <input type="text" value={newName} onChange={e=>setNewName(e.target.value)} placeholder="Имя профиля..." className="flex-1 bg-dark border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-indigo-500" autoFocus/>
+                                <Button size="sm" onClick={() => { if(newName.trim()){ onCreate(newName); setIsCreating(false); setNewName(''); } }}>Добавить</Button>
+                                <Button size="sm" variant="ghost" onClick={() => setIsCreating(false)}>Отмена</Button>
+                            </div>
+                        ) : (
+                            <Button variant="secondary" icon="plus" className="w-full mt-4" onClick={() => setIsCreating(true)}>Создать новый профиль</Button>
+                        )}
+                    </div>
+                </Modal>
+            );
+        };
+
         const App = () => {
-            const [view, setView] = useState('schedule'); // schedule, stats, programs
+                                    const [workspaces, setWorkspaces] = useState(() => { const saved = localStorage.getItem('flexcode_workspaces'); return saved ? JSON.parse(saved) : [{ id: 'default', name: 'Основной профиль' }]; });
+            const [activeWorkspaceId, setActiveWorkspaceId] = useState(() => localStorage.getItem('flexcode_active_workspace') || 'default');
+            const [isWorkspaceManagerOpen, setIsWorkspaceManagerOpen] = useState(false);
+            const [view, setView] = useState('schedule');
             const [programs, setPrograms] = useState([]);
             const [activeWorkout, setActiveWorkout] = useState(null);
             const [history, setHistory] = useState([]);
             const [selectedProgram, setSelectedProgram] = useState(null);
             const [notifications, setNotifications] = useState([]);
-            const [settings, setSettings] = useState(DEFAULT_SETTINGS.player);
+            const [settings, setSettings] = useState(() => { const saved = localStorage.getItem('flexcode_settings'); return saved ? JSON.parse(saved) : DEFAULT_SETTINGS.player; });
+            const [reminders, setReminders] = useState(() => { const saved = localStorage.getItem('flexcode_reminders'); return saved ? JSON.parse(saved) : []; });
             const [isEditorOpen, setIsEditorOpen] = useState(false);
             const [isAchievementsOpen, setIsAchievementsOpen] = useState(false);
             const [isLoading, setIsLoading] = useState(true);
@@ -2580,41 +2991,94 @@
             }, [programs, history, isLoading]);
 
 
-            // Загрузка данных
+                                    // Загрузка данных (С учетом профилей)
+            const remindersRef = useRef(reminders);
+            const notifiedRemindersRef = useRef(new Set());
+
+            // Тихо обновляем Ref без перезапуска таймера
             useEffect(() => {
-                const load = () => {
-                    try {
-                        const savedProgs = localStorage.getItem('flexcode_programs');
-                        const savedHist = localStorage.getItem('flexcode_history');
-                        const savedSettings = localStorage.getItem('flexcode_settings');
-                        const savedAchievements = localStorage.getItem('flexcode_achievements');
+                remindersRef.current = reminders;
+            }, [reminders]);
 
-                        setPrograms(savedProgs ? JSON.parse(savedProgs) : DEFAULT_PROGRAM);
-                        setHistory(savedHist ? JSON.parse(savedHist) : []);
-                        setSettings(savedSettings ? JSON.parse(savedSettings) : DEFAULT_SETTINGS.player);
-                        setUnlockedAchievements(savedAchievements ? JSON.parse(savedAchievements) : []);
-
-                    } catch (e) {
-                        console.error("Load failed", e);
-                        setPrograms(DEFAULT_PROGRAM);
-                        setSettings(DEFAULT_SETTINGS.player);
-                        setUnlockedAchievements([]);
-                    } finally {
-                        setIsLoading(false);
-                    }
-                };
-                load();
+            // Сам таймер запускается строго один раз
+            useEffect(() => {
+                const interval = setInterval(() => {
+                    const now = new Date();
+                    const todayStr = now.toDateString();
+                    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+                    
+                    remindersRef.current.forEach(r => {
+                        if (r.trigger === 'time' && r.time === timeStr && r.lastCompleted !== todayStr) {
+                            const notifKey = `${r.id}_${todayStr}`;
+                            // Защита от спама: уведомляем только один раз в день для конкретного времени
+                            if (!notifiedRemindersRef.current.has(notifKey)) {
+                                addNotification('info', '⏰ Время добавок!', `Примите: ${r.title} (${r.dosage})`);
+                                notifiedRemindersRef.current.add(notifKey);
+                                if (r.frequency === 'once') {
+                                    setReminders(prev => prev.filter(item => item.id !== r.id));
+                                }
+                            }
+                        }
+                    });
+                }, 10000); // Чекаем каждые 10 секунд, чтобы точно попасть в минуту
+                return () => clearInterval(interval);
             }, []);
 
-            // Сохранение данных
+            useEffect(() => {
+                setIsLoading(true);
+                try {
+                    const suffix = activeWorkspaceId === 'default' ? '' : `_${activeWorkspaceId}`;
+                    const savedProgs = localStorage.getItem(`flexcode_programs${suffix}`);
+                    const savedHist = localStorage.getItem(`flexcode_history${suffix}`);
+                    const savedAchievements = localStorage.getItem(`flexcode_achievements${suffix}`);
+
+                    setPrograms(savedProgs ? JSON.parse(savedProgs) : DEFAULT_PROGRAM);
+                    setHistory(savedHist ? JSON.parse(savedHist) : []);
+                    setUnlockedAchievements(savedAchievements ? JSON.parse(savedAchievements) : []);
+                    
+                    // Обновляем текущий активный профиль в памяти
+                    localStorage.setItem('flexcode_active_workspace', activeWorkspaceId);
+                } catch (e) {
+                    console.error("Load failed", e);
+                } finally {
+                    setIsLoading(false);
+                }
+            }, [activeWorkspaceId]); // Перезагружаем ТОЛЬКО программы при смене профиля
+
+            // Сохранение данных (С учетом профилей)
             useEffect(() => {
                 if (!isLoading) {
-                    localStorage.setItem('flexcode_programs', JSON.stringify(programs));
-                    localStorage.setItem('flexcode_history', JSON.stringify(history));
+                    const suffix = activeWorkspaceId === 'default' ? '' : `_${activeWorkspaceId}`;
+                    localStorage.setItem(`flexcode_programs${suffix}`, JSON.stringify(programs));
+                    localStorage.setItem(`flexcode_history${suffix}`, JSON.stringify(history));
+                    localStorage.setItem(`flexcode_achievements${suffix}`, JSON.stringify(unlockedAchievements));
+                    
                     localStorage.setItem('flexcode_settings', JSON.stringify(settings));
-                    localStorage.setItem('flexcode_achievements', JSON.stringify(unlockedAchievements));
+                    localStorage.setItem('flexcode_reminders', JSON.stringify(reminders));
+                    localStorage.setItem('flexcode_workspaces', JSON.stringify(workspaces));
+                    localStorage.setItem('flexcode_active_workspace', activeWorkspaceId);
                 }
-            }, [programs, history, settings, isLoading, unlockedAchievements]);
+            }, [programs, history, settings, unlockedAchievements, activeWorkspaceId, workspaces, isLoading]);
+
+            // Управление профилями
+            const handleCreateWorkspace = (name) => {
+                const newId = 'ws_' + Date.now();
+                setWorkspaces([...workspaces, { id: newId, name }]);
+                setActiveWorkspaceId(newId); // Автоматом переключаем на новый
+            };
+            const handleDeleteWorkspace = (id) => {
+                const updated = workspaces.filter(w => w.id !== id);
+                setWorkspaces(updated);
+                if (activeWorkspaceId === id) setActiveWorkspaceId(updated[0].id);
+                // Очистка памяти браузера
+                localStorage.removeItem(`flexcode_programs_${id}`);
+                localStorage.removeItem(`flexcode_history_${id}`);
+                localStorage.removeItem(`flexcode_achievements_${id}`);
+            };
+            const handleRenameWorkspace = (id, newName) => {
+                setWorkspaces(workspaces.map(w => w.id === id ? { ...w, name: newName } : w));
+            };
+
 
 
             // Обработчики
@@ -2637,7 +3101,7 @@
 
             const handleProgramSave = (newPrograms) => {
                 setPrograms(newPrograms);
-                const newAchievementIds = AchievementEngine.check('onProgramSave', {}, unlockedAchievements);
+                const newAchievementIds = AchievementEngine.check('onProgramSave', { programs: newPrograms }, unlockedAchievements);
                 handleNewAchievements(newAchievementIds);
                 setIsEditorOpen(false);
                 AudioEngine.playBeep();
@@ -2662,6 +3126,27 @@
                 setActiveWorkout(null);
 
                 addNotification('success', 'Тренировка завершена', `Отличная работа!`);
+                
+                // Проверка пост-тренировочных напоминаний
+                const pendingPost = reminders.filter(r => r.trigger === 'post_workout' && r.lastCompleted !== new Date().toDateString());
+                if (pendingPost.length > 0) {
+                    pendingPost.forEach((r, idx) => {
+                        setTimeout(() => addNotification('warning', '💊 Время добавок!', `Не забудьте: ${r.title} (${r.dosage})`), 1500 + (idx * 1000));
+                    });
+                }
+
+                // Пересчитываем статусы (сбрасываем "Каждую тренировку" и удаляем "Разовые")
+                setReminders(prev => {
+                    const today = new Date().toDateString();
+                    return prev.filter(r => {
+                        if (r.frequency === 'once' && pendingPost.find(p => p.id === r.id)) return false;
+                        return true;
+                    }).map(r => {
+                        if (r.frequency === 'every_workout') return { ...r, lastCompleted: null };
+                        if (pendingPost.find(p => p.id === r.id)) return { ...r, lastCompleted: today };
+                        return r;
+                    });
+                });
 
                 if (settings.enableVibration && 'vibrate' in navigator) {
                     navigator.vibrate([200, 100, 200]);
@@ -2712,11 +3197,16 @@
 
                         {/* Верхняя панель */}
                         <div className="sticky top-0 z-30 px-6 py-4 glass-header flex justify-between items-center safe-pt">
-                            <div className="flex items-center gap-2">
+                                                        <div className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setIsWorkspaceManagerOpen(true)}>
                                 <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
                                     <Icon name="dumbbell" className="text-white" size={18} />
                                 </div>
-                                <span className="font-bold text-lg tracking-tight text-white">FlexCode<span className="text-indigo-500">Pro</span></span>
+                                <div className="flex flex-col">
+                                    <span className="font-bold text-lg tracking-tight text-white leading-none">FlexCode<span className="text-indigo-500">Pro</span></span>
+                                    <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wider flex items-center gap-1 mt-1">
+                                        {workspaces.find(w => w.id === activeWorkspaceId)?.name} <Icon name="chevron-down" size={10}/>
+                                    </span>
+                                </div>
                             </div>
                             <div className="flex gap-2">
                                 <button onClick={() => setIsEditorOpen(true)} className="p-2 rounded-lg bg-surface border border-white/10 text-gray-300 hover:text-white hover:border-indigo-500/50 transition-all">
@@ -2747,6 +3237,10 @@
 
                             {view === 'stats' && (
                                 <StatsDashboard history={history} programs={progressedPrograms} />
+                            )}
+
+                            {view === 'reminders' && (
+                                <RemindersView reminders={reminders} setReminders={setReminders} />
                             )}
 
                             {view === 'programs' && (
@@ -2810,9 +3304,9 @@
                                     <Icon name="bar-chart-2" size={22} className={view === 'stats' ? 'stroke-[2.5px]' : ''} />
                                     <span className="text-[10px] font-medium">Статистика</span>
                                 </button>
-                                <button onClick={() => setIsEditorOpen(true)} className="flex flex-col items-center gap-1 w-full h-full justify-center text-gray-500 hover:text-gray-300">
-                                    <Icon name="code" size={22} />
-                                    <span className="text-[10px] font-medium">Редактор</span>
+                                <button onClick={() => setView('reminders')} className={`flex flex-col items-center gap-1 w-full h-full justify-center ${view === 'reminders' ? 'text-indigo-400' : 'text-gray-500 hover:text-gray-300'}`}>
+                                    <Icon name="bell" size={22} className={view === 'reminders' ? 'stroke-[2.5px]' : ''} />
+                                    <span className="text-[10px] font-medium">Добавки</span>
                                 </button>
                             </div>
                         </div>
@@ -2831,6 +3325,8 @@
                                 program={selectedProgram}
                                 onClose={() => setSelectedProgram(null)}
                                 onStartWorkout={setActiveWorkout}
+                                reminders={reminders}
+                                setReminders={setReminders}
                                 onEdit={() => {
                                     setSelectedProgram(null);
                                     setIsEditorOpen(true);
@@ -2845,22 +3341,40 @@
                                 onComplete={handleWorkoutComplete}
                                 settings={settings}
                                 onSettingsChange={handleSettingsChange}
+                                history={history}
                             />
                         )}
 
-                        <AchievementsModal
+                                                <AchievementsModal
                             isOpen={isAchievementsOpen}
                             onClose={() => setIsAchievementsOpen(false)}
                             unlockedIds={unlockedAchievements}
+                        />
+
+                        <WorkspaceManagerModal
+                            isOpen={isWorkspaceManagerOpen}
+                            onClose={() => setIsWorkspaceManagerOpen(false)}
+                            workspaces={workspaces}
+                            activeId={activeWorkspaceId}
+                            onSwitch={setActiveWorkspaceId}
+                            onCreate={handleCreateWorkspace}
+                            onDelete={handleDeleteWorkspace}
+                            onRename={handleRenameWorkspace}
                         />
                     </div>
                 </ErrorBoundary>
             );
         };
 
-        // Рендеринг приложения
+                // Рендеринг приложения
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
+    </script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js')
+                .then(() => console.log('PWA Ready'));
+        }
     </script>
 </body>
 
