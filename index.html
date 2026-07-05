@@ -749,6 +749,9 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
 
                 let lastWeight = parseFloat(String(lastSets[0].weight).replace(/[^0-9.]/g, ''));
                 if (isNaN(lastWeight)) lastWeight = parseFloat(String(exercise.weight).replace(/[^0-9.]/g, '')) || 0;
+                
+                let baseWeight = parseFloat(String(exercise.weight).replace(/[^0-9.]/g, '')) || 0;
+                lastWeight = Math.max(lastWeight, baseWeight);
 
                 let lastReps = parseInt(String(lastSets[0].reps).split('-')[0]);
                 if (isNaN(lastReps)) lastReps = parseInt(String(exercise.reps).split('-')[0]) || 0;
@@ -982,8 +985,10 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                             </div>
                             <button
                                 onClick={() => {
-                                    localStorage.clear();
-                                    window.location.reload();
+                                    if (window.confirm('ВНИМАНИЕ! Это действие безвозвратно удалит ВСЮ вашу историю тренировок во всех профилях. Вы уверены?')) {
+                                        localStorage.clear();
+                                        window.location.reload();
+                                    }
                                 }}
                                 className="px-6 py-3 bg-red-600 hover:bg-red-700 rounded-xl font-bold transition-colors"
                             >
@@ -1121,7 +1126,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
 
             return (
                 <div className="relative flex flex-col items-center justify-center">
-                    <svg width={size} height={size} className="transform -rotate-90">
+                    <svg width={size} height={size}>
                         <circle
                             stroke="rgba(255,255,255,0.05)"
                             strokeWidth={strokeWidth}
@@ -1577,6 +1582,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
             const progressBarRef = useRef(null);
             const pausedTimeRef = useRef(0);
             const pauseStartRef = useRef(null);
+            const targetTimeRef = useRef(null);
 
             const exercise = useMemo(() => workout.exercises[exIndex], [exIndex, workout]);
             const totalSets = exercise?.sets || 3;
@@ -1606,13 +1612,13 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
             // Расчет прогресса
             const totalExercises = workout.exercises.length;
             const totalWorkoutSets = useMemo(() => {
-                return workout.exercises.reduce((acc, ex) => acc + (ex.sets || 1), 0);
+                return workout.exercises.reduce((acc, ex) => acc + (parseInt(ex.sets) || 1), 0);
             }, [workout]);
 
             const completedWorkoutSets = useMemo(() => {
                 let completed = 0;
                 for (let i = 0; i < exIndex; i++) {
-                    completed += workout.exercises[i].sets || 1;
+                    completed += parseInt(workout.exercises[i].sets) || 1;
                 }
                 completed += setIndex - 1;
                 return completed;
@@ -1647,58 +1653,60 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
             // Основной таймер
             useEffect(() => {
                 if (isPaused || phase === 'complete' || phase === 'init') return;
+                
+                let duration = 0;
+                if (phase === 'countdown') duration = countdown;
+                else if (phase === 'work' && exercise.type === 'time') duration = timeLeft;
+                else if (phase === 'rest') duration = timeLeft;
+                
+                targetTimeRef.current = Date.now() + duration * 1000;
+            }, [phase, isPaused]);
+
+            useEffect(() => {
+                if (isPaused || phase === 'complete' || phase === 'init') return;
 
                 const tick = () => {
-                    if (phase === 'countdown') {
-                        setCountdown(prev => {
-                            if (prev <= 1) {
-                                changePhase('work');
-                                return 0;
-                            }
-                            AudioEngine.playCountdown();
-                            return prev - 1;
-                        });
-                    } else if (phase === 'work' && exercise.type === 'time') {
-                        setTimeLeft(prev => {
-                            if (prev <= 1) {
-                                handleWorkComplete();
-                                return 0;
-                            }
-                            return prev - 1;
-                        });
-                    } else if (phase === 'rest') {
-                        setTimeLeft(prev => {
-                            if (prev <= 1) {
-                                handleRestComplete();
-                                return 0;
-                            }
+                    const now = Date.now();
+                    const remaining = Math.ceil((targetTimeRef.current - now) / 1000);
 
-                            // Обновление советов по отдыху
+                    if (phase === 'countdown') {
+                        if (remaining <= 0) {
+                            changePhase('work');
+                            setCountdown(0);
+                        } else if (countdown !== remaining) {
+                            setCountdown(remaining);
+                            AudioEngine.playCountdown();
+                        }
+                    } else if (phase === 'work' && exercise.type === 'time') {
+                        if (remaining <= 0) {
+                            handleWorkComplete();
+                            setTimeLeft(0);
+                        } else {
+                            setTimeLeft(remaining);
+                        }
+                    } else if (phase === 'rest') {
+                        if (remaining <= 0) {
+                            handleRestComplete();
+                            setTimeLeft(0);
+                        } else {
+                            setTimeLeft(remaining);
                             let advice = '';
-                            if (prev > 30) {
-                                advice = 'Глубоко дышите, восстановите пульс';
-                            } else if (prev > 10) {
-                                advice = 'Приготовьтесь к следующему подходу';
-                            } else {
-                                advice = 'Вставайте в исходное положение';
-                            }
+                            if (remaining > 30) advice = 'Глубоко дышите, восстановите пульс';
+                            else if (remaining > 10) advice = 'Приготовьтесь к следующему подходу';
+                            else advice = 'Вставайте в исходное положение';
                             setShowRestAdvice(advice);
 
-                            // Уведомления
-                            if (prev <= 4 && prev > 1) {
+                            if (remaining <= 4 && remaining > 1 && timeLeft !== remaining) {
                                 AudioEngine.playBeep();
-                                if (settings.enableVibration && 'vibrate' in navigator) {
-                                    navigator.vibrate(50);
-                                }
+                                if (settings.enableVibration && 'vibrate' in navigator) navigator.vibrate(50);
                             }
-                            return prev - 1;
-                        });
+                        }
                     }
                 };
 
-                const interval = setInterval(tick, 1000);
+                const interval = setInterval(tick, 200);
                 return () => clearInterval(interval);
-            }, [phase, isPaused, exercise, settings]);
+            }, [phase, isPaused, exercise, settings, countdown, timeLeft]);
 
             // Функции переходов
             const startCountdown = () => {
@@ -1725,9 +1733,13 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                     }
                     setTimeLeft(exercise.restAfter || workout.globalRestTime || 60);
                     setShowRestAdvice('Глубоко дышите, восстановите пульс');
+                }
+            };
 
-                    // Добавляем выполненный подход
-                    setCompletedSets(prev => [...prev, {
+            const handleWorkComplete = () => {
+                setCompletedSets(prev => {
+                    if (prev.some(s => s.exerciseId === exercise.id && s.setNumber === setIndex)) return prev;
+                    return [...prev, {
                         exerciseId: exercise.id,
                         exerciseName: exercise.name,
                         setNumber: setIndex,
@@ -1735,17 +1747,15 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                         reps: actualReps || String(exercise.reps).split('-')[0],
                         type: exercise.type,
                         timestamp: new Date().toISOString()
-                    }]);
-                }
-            };
+                    }];
+                });
 
-            const handleWorkComplete = () => {
                 const currentEx = workout.exercises[exIndex];
                 const nextEx = workout.exercises[exIndex + 1];
 
                 if (currentEx.supersetId && nextEx && nextEx.supersetId === currentEx.supersetId) {
                     setExIndex(prev => prev + 1);
-                    changePhase('work'); // Сразу переходим к следующему упражнению суперсета
+                    changePhase('work');
                 } else {
                     changePhase('rest');
                 }
@@ -1806,14 +1816,18 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
             };
 
             const finishWorkout = () => {
-setCompletedSets(prev => { const isSaved = prev.some(s => s.exerciseId === exercise.id && s.setNumber === setIndex); return isSaved ? prev : [...prev, { exerciseId: exercise.id, exerciseName: exercise.name, setNumber: setIndex, weight: actualWeight ? `${actualWeight}kg` : exercise.weight, reps: actualReps || String(exercise.reps).split('-')[0], type: exercise.type, timestamp: new Date().toISOString() }]; });
                 setPhase('complete');
                 AudioEngine.playComplete();
-                onComplete({
-                    duration: Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000),
-                    sets: completedSets.length,
-                    completedSets,
-                    workoutName: workout.scheduleName
+                setCompletedSets(prev => {
+                    const isSaved = prev.some(s => s.exerciseId === exercise.id && s.setNumber === setIndex);
+                    const finalSets = isSaved ? prev : [...prev, { exerciseId: exercise.id, exerciseName: exercise.name, setNumber: setIndex, weight: actualWeight ? `${actualWeight}kg` : exercise.weight, reps: actualReps || String(exercise.reps).split('-')[0], type: exercise.type, timestamp: new Date().toISOString() }];
+                    onComplete({
+                        duration: Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000),
+                        sets: finalSets.length,
+                        completedSets: finalSets,
+                        workoutName: workout.scheduleName
+                    });
+                    return finalSets;
                 });
 
                 if (settings.enableVibration && 'vibrate' in navigator) {
@@ -2684,7 +2698,7 @@ setCompletedSets(prev => { const isSaved = prev.some(s => s.exerciseId === exerc
         // 6. ДЕТАЛЬНЫЙ ПРОСМОТР ПРОГРАММЫ
         const ProgramDetailView = ({ program, onClose, onStartWorkout, onEdit, reminders, setReminders }) => {
             const pendingPreWorkout = reminders?.filter(r => r.trigger === 'pre_workout' && r.lastCompleted !== new Date().toDateString()) || [];
-            const totalSets = program.exercises.reduce((acc, ex) => acc + (ex.sets || 1), 0);
+            const totalSets = program.exercises.reduce((acc, ex) => acc + (parseInt(ex.sets) || 1), 0);
                         const estimatedDuration = Math.round(program.exercises.reduce((acc, ex) =>
                 acc + (ex.sets * (ex.type === 'time' ? ex.timer : 45) + ex.sets * (ex.restAfter || program.globalRestTime || 60)), 0
             ) / 60);
