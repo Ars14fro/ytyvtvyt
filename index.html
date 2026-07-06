@@ -17,8 +17,10 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Chart.js -->
+        <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- LocalForage (IndexedDB) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
 
@@ -675,16 +677,24 @@
 
         const generateId = () => Math.random().toString(36).substr(2, 9);
 
-        const calculateTrainingVolume = (exercise, setRecord = null) => {
+                const calculateTrainingVolume = (exercise, setRecord = null) => {
+            const t = setRecord?.type || exercise.type;
+            if (t === 'time') return 0; // Для времени объем не считаем в кг
+            
             const w = setRecord?.weight || exercise.weight;
             const r = setRecord?.reps || exercise.reps;
-            const t = setRecord?.type || exercise.type;
-            if (!w || t === 'time') return 0;
-            const weight = parseFloat(w);
-            let reps = r === 'Max' ? 10 : String(r).split('-')[0];
-            // Считаем объем строго для 1 подхода (так как функция вызывается внутри цикла по всем подходам)
-            if (isNaN(weight) || isNaN(reps)) return 0;
-            return weight * parseInt(reps);
+            if (!w) return 0;
+            
+            // Надежный парсинг веса (обрабатывает запятые и лишние символы)
+            const weightStr = String(w).replace(/,/g, '.').replace(/[^0-9.]/g, '');
+            const weight = parseFloat(weightStr) || 0;
+            
+            // Надежный парсинг повторений
+            let repsStr = String(r || '0').toLowerCase();
+            let reps = parseInt(repsStr.split('-')[0]);
+            if (isNaN(reps)) reps = repsStr === 'max' ? (setRecord ? parseInt(setRecord.reps) || 0 : 0) : 0;
+            
+            return weight * reps;
         };
 
         const getGreeting = () => {
@@ -699,28 +709,39 @@
             return days[new Date().getDay()];
         };
 
-        const calculateStreak = (history) => {
-            if (history.length === 0) return 0;
+                const calculateStreak = (history) => {
+            if (!history || history.length === 0) return 0;
+            
+            // Получаем уникальные недели тренировок (приводим даты к понедельнику)
+            const weeks = [...new Set(history.map(h => {
+                const d = new Date(h.date);
+                const day = d.getDay() || 7;
+                d.setHours(-24 * (day - 1), 0, 0, 0);
+                return d.getTime();
+            }))].sort((a, b) => b - a);
+
+            if (weeks.length === 0) return 0;
+
+            const now = new Date();
+            const currentDay = now.getDay() || 7;
+            now.setHours(-24 * (currentDay - 1), 0, 0, 0);
+            const currentWeekTime = now.getTime();
+            const msInWeek = 7 * 24 * 60 * 60 * 1000;
+
+            // Если последняя треня была раньше прошлой недели - стрик мертв
+            if (currentWeekTime - weeks[0] > msInWeek) return 0;
 
             let streak = 0;
-            const today = new Date().toDateString();
-            const sortedHistory = [...history].sort((a, b) => new Date(b.date) - new Date(a.date));
+            let expectedWeek = weeks[0];
 
-            let currentDate = new Date();
-
-            for (let i = 0; i < 365; i++) {
-                const dateStr = currentDate.toDateString();
-                const hasWorkout = sortedHistory.some(h => new Date(h.date).toDateString() === dateStr);
-if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); continue; }
-
-                if (hasWorkout) {
+            for (let i = 0; i < weeks.length; i++) {
+                if (weeks[i] === expectedWeek) {
                     streak++;
-                    currentDate.setDate(currentDate.getDate() - 1);
+                    expectedWeek -= msInWeek;
                 } else {
                     break;
                 }
             }
-
             return streak;
         };
         const calculateProgression = (program, history) => {
@@ -749,45 +770,102 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
 
                 let lastWeight = parseFloat(String(lastSets[0].weight).replace(/[^0-9.]/g, ''));
                 if (isNaN(lastWeight)) lastWeight = parseFloat(String(exercise.weight).replace(/[^0-9.]/g, '')) || 0;
-                
-                let baseWeight = parseFloat(String(exercise.weight).replace(/[^0-9.]/g, '')) || 0;
-                lastWeight = Math.max(lastWeight, baseWeight);
 
                 let lastReps = parseInt(String(lastSets[0].reps).split('-')[0]);
                 if (isNaN(lastReps)) lastReps = parseInt(String(exercise.reps).split('-')[0]) || 0;
 
-                exercise.hasProgression = false;
+                                exercise.hasProgression = false;
+                const threshold = exercise.progression.threshold || 1;
 
-                if (type === 'double') {
-                    const targetReps = parseInt(String(exercise.reps).split('-')[1] || exercise.reps);
-                    const isSuccess = lastSets.length >= exercise.sets && lastSets.every(s => parseInt(s.reps) >= targetReps);
+                                if (type === 'double') {
+                    const lowerBound = parseInt(String(exercise.reps).split('-')[0]) || 0;
+                    const upperBound = parseInt(String(exercise.reps).split('-')[1] || lowerBound);
+                    
+                    // Провал двойной прогрессии (упали ниже минимальной границы)
+                    const isFail = lastSets.some(s => parseInt(s.reps) < lowerBound);
+                    // Успех (пробили верхнюю границу во всех сетах)
+                    const isSuccess = lastSets.length >= exercise.sets && lastSets.every(s => parseInt(s.reps) >= upperBound);
 
                     if (isSuccess) {
-                        exercise.weight = `${lastWeight + increment}kg`;
-                        exercise.progressionText = `+${increment}кг (Цель взята!)`;
-                        exercise.hasProgression = true;
+                        let streak = 0;
+                        for (let i = allPastSessions.length - 1; i >= 0; i--) {
+                            if (allPastSessions[i].sets.length >= exercise.sets && allPastSessions[i].sets.every(s => parseInt(s.reps) >= upperBound)) streak++;
+                            else break;
+                        }
+                        if (streak >= threshold) {
+                            exercise.weight = `${lastWeight + increment}kg`;
+                            exercise.progressionText = `+${increment}кг (Цель взята!) 📈`;
+                            exercise.hasProgression = true;
+                            // Самое важное: не сбрасываем строку reps, чтобы в UI парсилась нижняя граница!
+                        } else {
+                            exercise.weight = `${lastWeight}kg`;
+                            if (threshold > 1) {
+                                exercise.progressionText = `Закрепление ${streak}/${threshold} ⏳`;
+                                exercise.hasProgression = true;
+                            }
+                        }
+                    } else if (isFail) {
+                        exercise.weight = `${lastWeight}kg`;
+                        exercise.progressionText = `Удержание (Откат) ⚠️`;
                     } else {
                         exercise.weight = `${lastWeight}kg`;
-                        exercise.progressionText = `Удержание веса (цель не взята)`;
+                        exercise.progressionText = `Внутри цикла (${lowerBound}-${upperBound})`;
                     }
                 } else if (type === 'weight') {
-                    let shouldIncrease = true;
-                    if (frequency === 'week' && allPastSessions.length > 1) {
-                        const lastDate = new Date(lastSession.date);
-                        const diffDays = (new Date() - lastDate) / (1000 * 60 * 60 * 24);
-                        if (diffDays < 5) shouldIncrease = false;
+                    const deloadThreshold = exercise.progression.deloadThreshold || 3;
+                    const deloadPercent = exercise.progression.deloadPercent || 10;
+                    let successStreak = 0;
+                    let failStreak = 0;
+                    
+                    for (let i = allPastSessions.length - 1; i >= 0; i--) {
+                        let actualW = parseFloat(String(allPastSessions[i].sets[0].weight).replace(/[^0-9.]/g, ''));
+                        let actualReps = parseInt(allPastSessions[i].sets[0].reps) || 0;
+                        let targetReps = parseInt(String(exercise.reps).split('-')[0]) || 0;
+                        
+                        if (actualW >= lastWeight && actualReps >= targetReps) {
+                            successStreak++; failStreak = 0;
+                        } else {
+                            failStreak++; successStreak = 0;
+                        }
                     }
-                    if (shouldIncrease) {
+
+                    if (failStreak >= deloadThreshold) {
+                        let newW = lastWeight * (1 - (deloadPercent / 100));
+                        newW = Math.round(newW * 10) / 10; // Точное округление до 1 знака
+                        exercise.weight = `${newW}kg`;
+                        exercise.progressionText = `Разгрузка -${deloadPercent}% 📉`;
+                        exercise.hasProgression = true;
+                    } else if (successStreak >= threshold) {
                         exercise.weight = `${lastWeight + increment}kg`;
-                        exercise.progressionText = `+${increment}кг`;
+                        exercise.progressionText = `+${increment}кг 📈`;
                         exercise.hasProgression = true;
                     } else {
                         exercise.weight = `${lastWeight}kg`;
+                        if (threshold > 1) {
+                            exercise.progressionText = `Закрепление ${successStreak}/${threshold} ⏳`;
+                            exercise.hasProgression = true;
+                        }
                     }
-                } else if (type === 'reps' && exercise.reps !== 'Max') {
-                    exercise.reps = String(lastReps + increment);
-                    exercise.progressionText = `+${increment} повт`;
-                    exercise.hasProgression = true;
+                } else if ((type === 'reps' && exercise.reps !== 'Max') || type === 'time') {
+                    let lastVal = parseInt(lastSets[0].reps);
+                    if (isNaN(lastVal)) lastVal = type === 'time' ? (parseInt(exercise.timer) || 0) : (parseInt(String(exercise.reps).split('-')[0]) || 0);
+                    let streak = 0;
+                    for (let i = allPastSessions.length - 1; i >= 0; i--) {
+                        let v = parseInt(allPastSessions[i].sets[0].reps);
+                        if (v >= lastVal) streak++; else break;
+                    }
+                    if (streak >= threshold) {
+                        const nextVal = lastVal + increment;
+                        if (type === 'time') exercise.timer = nextVal; else exercise.reps = String(nextVal);
+                        exercise.progressionText = `+${increment}${type === 'time' ? 'с' : ' повт'} 📈`;
+                        exercise.hasProgression = true;
+                    } else {
+                        if (type === 'time') exercise.timer = lastVal; else exercise.reps = String(lastVal);
+                        if (threshold > 1) {
+                            exercise.progressionText = `Закрепление ${streak}/${threshold} ⏳`;
+                            exercise.hasProgression = true;
+                        }
+                    }
                 }
             });
             return newProgram;
@@ -804,8 +882,8 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                 countdownDuration: 3,
                 showRestTime: true,
                 enableVibration: 'vibration' in navigator,
-                showEquipmentIcons: true,
-                voiceAssistant: false
+                                showEquipmentIcons: true,
+                audioMode: 'beeps' // 'beeps', 'voice', 'silent'
             },
             notifications: {
                 workoutComplete: true,
@@ -985,10 +1063,8 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                             </div>
                             <button
                                 onClick={() => {
-                                    if (window.confirm('ВНИМАНИЕ! Это действие безвозвратно удалит ВСЮ вашу историю тренировок во всех профилях. Вы уверены?')) {
-                                        localStorage.clear();
-                                        window.location.reload();
-                                    }
+                                    localStorage.clear();
+                                    window.location.reload();
                                 }}
                                 className="px-6 py-3 bg-red-600 hover:bg-red-700 rounded-xl font-bold transition-colors"
                             >
@@ -1126,7 +1202,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
 
             return (
                 <div className="relative flex flex-col items-center justify-center">
-                    <svg width={size} height={size}>
+                    <svg width={size} height={size} className="transform -rotate-90">
                         <circle
                             stroke="rgba(255,255,255,0.05)"
                             strokeWidth={strokeWidth}
@@ -1244,9 +1320,9 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                                             {exercise.name}
                                             {exercise.supersetId && <span className="ml-2 text-[10px] bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded-full border border-purple-500/30 uppercase tracking-wider">🔗 Суперсет</span>}
                                         </h4>
-                                        {exercise.hasProgression && (
-                                            <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] font-bold rounded-full uppercase tracking-wider border border-green-500/30 shadow-[0_0_8px_rgba(34,197,94,0.2)]">
-                                                {exercise.progressionText} 📈
+                                                                                                                        {exercise.hasProgression && (
+                                            <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full uppercase tracking-wider border shadow-sm whitespace-nowrap ${exercise.progressionText.includes('Закрепление') ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30 shadow-[0_0_8px_rgba(234,179,8,0.2)]' : exercise.progressionText.includes('Разгрузка') ? 'bg-blue-500/20 text-blue-400 border-blue-500/30 shadow-[0_0_8px_rgba(59,130,246,0.2)]' : 'bg-green-500/20 text-green-400 border-green-500/30 shadow-[0_0_8px_rgba(34,197,94,0.2)]'}`}>
+                                                {exercise.progressionText}
                                             </span>
                                         )}
                                     </div>
@@ -1532,20 +1608,18 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                                     </div>
                                 )}
 
-                                <div className="flex items-center justify-between p-3 bg-surface/30 rounded-lg mt-3">
-                                    <div>
-                                        <p className="text-white font-medium">Голосовой ассистент 🎙️</p>
-                                        <p className="text-xs text-gray-500">Озвучивать фазы и названия упражнений</p>
-                                    </div>
-                                    <label className="relative inline-flex items-center cursor-pointer">
-                                        <input
-                                            type="checkbox"
-                                            checked={localSettings.voiceAssistant}
-                                            onChange={(e) => setLocalSettings(s => ({ ...s, voiceAssistant: e.target.checked }))}
-                                            className="sr-only peer"
-                                        />
-                                        <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                                    </label>
+                                                                <div className="p-3 bg-surface/30 rounded-lg mt-3">
+                                    <p className="text-white font-medium mb-1">Звуковые уведомления 🎵</p>
+                                    <p className="text-xs text-gray-400 mb-3">Избегайте конфликтов с вашей музыкой</p>
+                                    <select
+                                        className="w-full bg-dark border border-white/10 rounded-lg p-2 text-white outline-none focus:border-indigo-500 text-sm"
+                                        value={localSettings.audioMode || 'beeps'}
+                                        onChange={(e) => setLocalSettings(s => ({ ...s, audioMode: e.target.value }))}
+                                    >
+                                        <option value="beeps">Только сигналы (Идеально для Spotify)</option>
+                                        <option value="voice">Голос + Сигналы (Может глушить музыку)</option>
+                                        <option value="silent">Без звука</option>
+                                    </select>
                                 </div>
                             </div>
                         </div>
@@ -1560,41 +1634,63 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
         };
 
         // 3. WORKOUT PLAYER (РАСШИРЕННАЯ ВЕРСИЯ)
-        const WorkoutPlayer = ({ workout, onClose, onComplete, settings = DEFAULT_SETTINGS.player, onSettingsChange, history = [] }) => {
+        const WorkoutPlayer = ({ workout, onClose, onComplete, settings = DEFAULT_SETTINGS.player, onSettingsChange, history = [], initialDraft = null }) => {
             const [actualWeight, setActualWeight] = useState('');
             const [actualReps, setActualReps] = useState('');
+            const [actualRpe, setActualRpe] = useState('');
             // States
-            const [exIndex, setExIndex] = useState(0);
-            const [setIndex, setSetIndex] = useState(1);
+            const [exIndex, setExIndex] = useState(initialDraft ? initialDraft.exIndex : 0);
             const [phase, setPhase] = useState('init');
             const [timeLeft, setTimeLeft] = useState(0);
             const [countdown, setCountdown] = useState(settings.countdownDuration);
             const [isPaused, setIsPaused] = useState(false);
             const [stats, setStats] = useState({ totalTime: 0, completedSets: 0 });
             const [showRestAdvice, setShowRestAdvice] = useState('');
-            const [completedSets, setCompletedSets] = useState([]);
-                        const [showSettings, setShowSettings] = useState(false);
+            const [completedSets, setCompletedSets] = useState(initialDraft ? initialDraft.completedSets : []);
+            const [showSettings, setShowSettings] = useState(false);
+
+            // Вычисляем setIndex строго ПОСЛЕ того, как объявлен completedSets
+            const setIndex = useMemo(() => {
+                if (!workout || !workout.exercises[exIndex] || !completedSets) return 1;
+                return completedSets.filter(s => s.exerciseId === workout.exercises[exIndex].id).length + 1;
+            }, [completedSets, exIndex, workout]);
 
             // Refs
             const wakeLockRef = useRef(null);
             const timerRef = useRef(null);
-            const startTimeRef = useRef(Date.now());
+            const startTimeRef = useRef(initialDraft ? initialDraft.startTime : Date.now());
+            const endTimeRef = useRef(null);
             const progressBarRef = useRef(null);
             const pausedTimeRef = useRef(0);
             const pauseStartRef = useRef(null);
-            const targetTimeRef = useRef(null);
 
             const exercise = useMemo(() => workout.exercises[exIndex], [exIndex, workout]);
             const totalSets = exercise?.sets || 3;
 
-            useEffect(() => {
+                        useEffect(() => {
                 if (exercise) {
-                    const w = String(exercise.weight || '').replace(/[^0-9.]/g, '');
-                    setActualWeight(w);
-                    const r = String(exercise.reps || '').split('-')[0];
-                    setActualReps(r === 'Max' ? '' : r);
+                    // Ищем, делали ли мы уже это упражнение в текущей сессии (чтобы перенести фактический вес)
+                                        // Берем ПЕРВЫЙ подход текущей сессии, чтобы дроп-сеты не ломали автозаполнение
+                    const firstDoneSet = completedSets.find(s => s.exerciseId === exercise.id);
+                    if (firstDoneSet && setIndex > 1) {
+                        // Пропускаем буквы BW и плюсы для собственного веса
+                        setActualWeight(String(firstDoneSet.weight || '').replace(/[^0-9.BW+]/ig, ''));
+                        setActualReps(firstDoneSet.reps);
+                        setActualRpe(firstDoneSet.rpe || '');
+                    } else {
+                        // Первый подход - берем дефолт из программы
+                        const w = String(exercise.weight || '').replace(/[^0-9.]/g, '');
+                        setActualWeight(w);
+                        setActualRpe(exercise.rpe || '');
+                        if (exercise.type === 'time') {
+                            setActualReps(exercise.timer || '');
+                        } else {
+                            const r = String(exercise.reps || '').split('-')[0];
+                            setActualReps(r === 'Max' ? '' : r);
+                        }
+                    }
                 }
-            }, [exercise]); // Убрали setIndex, чтобы вес наследовался на следующий подход
+            }, [exIndex, setIndex, exercise]); // Реагируем на любую смену упражнения или подхода
 
             const prevSetRecord = useMemo(() => {
                 if (!history || history.length === 0) return null;
@@ -1609,16 +1705,18 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                 return null;
             }, [history, exercise, setIndex]);
 
+                        // Убираем старые вызовы setSetIndex, так как теперь setIndex вычисляется автоматически
+
             // Расчет прогресса
             const totalExercises = workout.exercises.length;
             const totalWorkoutSets = useMemo(() => {
-                return workout.exercises.reduce((acc, ex) => acc + (parseInt(ex.sets) || 1), 0);
+                return workout.exercises.reduce((acc, ex) => acc + (ex.sets || 1), 0);
             }, [workout]);
 
             const completedWorkoutSets = useMemo(() => {
                 let completed = 0;
                 for (let i = 0; i < exIndex; i++) {
-                    completed += parseInt(workout.exercises[i].sets) || 1;
+                    completed += workout.exercises[i].sets || 1;
                 }
                 completed += setIndex - 1;
                 return completed;
@@ -1653,181 +1751,240 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
             // Основной таймер
             useEffect(() => {
                 if (isPaused || phase === 'complete' || phase === 'init') return;
-                
-                let duration = 0;
-                if (phase === 'countdown') duration = countdown;
-                else if (phase === 'work' && exercise.type === 'time') duration = timeLeft;
-                else if (phase === 'rest') duration = timeLeft;
-                
-                targetTimeRef.current = Date.now() + duration * 1000;
-            }, [phase, isPaused]);
-
-            useEffect(() => {
-                if (isPaused || phase === 'complete' || phase === 'init') return;
 
                 const tick = () => {
-                    const now = Date.now();
-                    const remaining = Math.ceil((targetTimeRef.current - now) / 1000);
-
                     if (phase === 'countdown') {
-                        if (remaining <= 0) {
-                            changePhase('work');
-                            setCountdown(0);
-                        } else if (countdown !== remaining) {
-                            setCountdown(remaining);
-                            AudioEngine.playCountdown();
-                        }
+                        setCountdown(prev => {
+                                                        if (prev <= 1) {
+                                changePhase('work');
+                                return 0;
+                            }
+                            if (settings.audioMode !== 'silent') AudioEngine.playCountdown();
+                            return prev - 1;
+                        });
                     } else if (phase === 'work' && exercise.type === 'time') {
-                        if (remaining <= 0) {
-                            handleWorkComplete();
-                            setTimeLeft(0);
-                        } else {
-                            setTimeLeft(remaining);
-                        }
+                        setTimeLeft(prev => {
+                            if (prev <= 1) {
+                                handleWorkComplete();
+                                return 0;
+                            }
+                            return prev - 1;
+                        });
                     } else if (phase === 'rest') {
-                        if (remaining <= 0) {
-                            handleRestComplete();
-                            setTimeLeft(0);
+                        const remain = Math.ceil((endTimeRef.current - Date.now()) / 1000);
+                        if (remain <= 0) {
+                            if (document.activeElement && document.activeElement.tagName === 'INPUT') {
+                                setShowRestAdvice('✍️ Ждем завершения ввода...');
+                                setTimeLeft(1);
+                                endTimeRef.current = Date.now() + 1000;
+                            } else {
+                                setTimeLeft(0);
+                                handleRestComplete();
+                            }
                         } else {
-                            setTimeLeft(remaining);
-                            let advice = '';
-                            if (remaining > 30) advice = 'Глубоко дышите, восстановите пульс';
-                            else if (remaining > 10) advice = 'Приготовьтесь к следующему подходу';
-                            else advice = 'Вставайте в исходное положение';
-                            setShowRestAdvice(advice);
-
-                            if (remaining <= 4 && remaining > 1 && timeLeft !== remaining) {
+                            if (remain > 30) setShowRestAdvice('Глубоко дышите, восстановите пульс');
+                            else if (remain > 10) setShowRestAdvice('Приготовьтесь к следующему подходу');
+                            else setShowRestAdvice('Вставайте в исходное положение');
+                            if (remain <= 3 && remain > 0 && remain !== timeLeft) {
+                                if (settings.audioMode !== 'silent') AudioEngine.playBeep();
+                                if (settings.enableVibration && 'vibrate' in navigator) navigator.vibrate(50);
+                            }
+                            setTimeLeft(remain);
+                        }
+                    } else if (phase === 'transit') {
+                        const remain = Math.ceil((endTimeRef.current - Date.now()) / 1000);
+                        if (remain <= 0) {
+                            if (document.activeElement && document.activeElement.tagName === 'INPUT') {
+                                setShowRestAdvice('✍️ Ждем завершения ввода...');
+                                setTimeLeft(1);
+                                endTimeRef.current = Date.now() + 1000;
+                            } else {
+                                setTimeLeft(0);
+                                handleTransitComplete();
+                            }
+                        } else {
+                            if (remain <= 3 && remain > 0 && remain !== timeLeft) {
                                 AudioEngine.playBeep();
                                 if (settings.enableVibration && 'vibrate' in navigator) navigator.vibrate(50);
                             }
+                            setTimeLeft(remain);
                         }
                     }
                 };
 
-                const interval = setInterval(tick, 200);
+                const interval = setInterval(tick, 1000);
                 return () => clearInterval(interval);
-            }, [phase, isPaused, exercise, settings, countdown, timeLeft]);
+            }, [phase, isPaused, exercise, settings]);
 
             // Функции переходов
-            const startCountdown = () => {
+                        const startCountdown = () => {
                 setPhase('countdown');
                 setCountdown(settings.countdownDuration);
-                AudioEngine.playCountdown();
+                if (settings.audioMode !== 'silent') AudioEngine.playCountdown();
             };
 
             const changePhase = (newPhase) => {
                 if (newPhase === 'work') {
                     setPhase('work');
-                    AudioEngine.playStart();
-                    if (settings.voiceAssistant) AudioEngine.speak(exercise.name);
-                    if (exercise.type === 'time') {
-                        setTimeLeft(exercise.timer || 60);
-                    }
+                    setActualRpe('');
+                    if (settings.audioMode !== 'silent') AudioEngine.playStart();
+                    if (settings.audioMode === 'voice') AudioEngine.speak(exercise.name);
+                    if (exercise.type === 'time') setTimeLeft(exercise.timer || 60);
                 } else if (newPhase === 'rest') {
                     setPhase('rest');
-                    AudioEngine.playRest();
-                    if (settings.voiceAssistant) {
+                    if (settings.audioMode !== 'silent') AudioEngine.playRest();
+                    if (settings.audioMode === 'voice') {
                         if (setIndex < totalSets) AudioEngine.speak('Отдых.');
                         else if (exIndex < workout.exercises.length - 1) AudioEngine.speak('Отдых. Следующее упражнение: ' + workout.exercises[exIndex + 1].name);
                         else AudioEngine.speak('Отдых перед завершением.');
                     }
-                    setTimeLeft(exercise.restAfter || workout.globalRestTime || 60);
+                    const dur = exercise.restAfter || workout.globalRestTime || 60;
+                    endTimeRef.current = Date.now() + (dur * 1000);
+                    setTimeLeft(dur);
                     setShowRestAdvice('Глубоко дышите, восстановите пульс');
+                } else if (newPhase === 'transit') {
+                    setPhase('transit');
+                    if (settings.audioMode !== 'silent') AudioEngine.playRest();
+                    if (settings.audioMode === 'voice') AudioEngine.speak('Смена снаряда.');
+                    endTimeRef.current = Date.now() + (15 * 1000);
+                    setTimeLeft(15);
+                    setShowRestAdvice('Запишите результат и переходите к следующему снаряду');
                 }
             };
 
-            const handleWorkComplete = () => {
-                setCompletedSets(prev => {
-                    if (prev.some(s => s.exerciseId === exercise.id && s.setNumber === setIndex)) return prev;
-                    return [...prev, {
-                        exerciseId: exercise.id,
-                        exerciseName: exercise.name,
-                        setNumber: setIndex,
-                        weight: actualWeight ? `${actualWeight}kg` : exercise.weight,
-                        reps: actualReps || String(exercise.reps).split('-')[0],
-                        type: exercise.type,
-                        timestamp: new Date().toISOString()
-                    }];
-                });
-
+                        const handleWorkComplete = () => {
                 const currentEx = workout.exercises[exIndex];
                 const nextEx = workout.exercises[exIndex + 1];
 
-                if (currentEx.supersetId && nextEx && nextEx.supersetId === currentEx.supersetId) {
-                    setExIndex(prev => prev + 1);
-                    changePhase('work');
+                // СОХРАНЯЕМ ПОДХОД ДО ПЕРЕХОДА (Особенно важно для суперсетов!)
+                setCompletedSets(prev => {
+                    let finalReps = actualReps;
+                    if (currentEx.type === 'time' && !actualReps) {
+                        finalReps = phase === 'work' ? Math.max(0, parseInt(currentEx.timer || 0) - timeLeft).toString() : currentEx.timer;
+                    } else if (!actualReps) {
+                        finalReps = String(currentEx.reps).split('-')[0];
+                    }
+                    
+                    const newSet = {
+                        exerciseId: currentEx.id,
+                        exerciseName: currentEx.name,
+                        setNumber: setIndex,
+                        weight: actualWeight ? `${actualWeight}kg` : currentEx.weight,
+                        reps: finalReps,
+                        type: currentEx.type,
+                        rpe: actualRpe || currentEx.rpe,
+                        timestamp: new Date().toISOString()
+                    };
+                    const existingIdx = prev.findIndex(s => s.exerciseId === currentEx.id && s.setNumber === setIndex);
+                    if (existingIdx !== -1) {
+                        const copy = [...prev];
+                        copy[existingIdx] = newSet;
+                        return copy;
+                    }
+                    return [...prev, newSet];
+                });
+
+                                                // Умный поиск следующего упражнения в суперсете
+                let nextExInSuperset = -1;
+                if (currentEx.supersetId) {
+                    let firstEx = exIndex;
+                    while (firstEx > 0 && workout.exercises[firstEx - 1].supersetId === currentEx.supersetId) firstEx--;
+                    
+                    for (let i = firstEx; i < workout.exercises.length; i++) {
+                        if (workout.exercises[i].supersetId !== currentEx.supersetId) break;
+                        const setsDone = completedSets.filter(s => s.exerciseId === workout.exercises[i].id).length;
+                        // Добавили +1, потому что currentEx еще не прошел цикл рендера и completedSets обновится асинхронно
+                        const actualSetsDone = (i === exIndex) ? setsDone + 1 : setsDone;
+                        if (actualSetsDone < (workout.exercises[i].sets || 1)) {
+                            nextExInSuperset = i;
+                            break;
+                        }
+                    }
+                }
+
+                if (nextExInSuperset !== -1 && nextExInSuperset !== exIndex) {
+                    changePhase('transit'); 
                 } else {
                     changePhase('rest');
                 }
             };
 
-                        const handleRestComplete = () => {
+            const findNextExercise = () => {
                 const currentEx = workout.exercises[exIndex];
-                let firstExOfSuperset = exIndex;
-                
                 if (currentEx.supersetId) {
-                    while (firstExOfSuperset > 0 && workout.exercises[firstExOfSuperset - 1].supersetId === currentEx.supersetId) {
-                        firstExOfSuperset--;
+                    let firstEx = exIndex;
+                    while (firstEx > 0 && workout.exercises[firstEx - 1].supersetId === currentEx.supersetId) firstEx--;
+                    
+                    for (let i = firstEx; i < workout.exercises.length; i++) {
+                        if (workout.exercises[i].supersetId !== currentEx.supersetId) break;
+                        const setsDone = completedSets.filter(s => s.exerciseId === workout.exercises[i].id).length;
+                        if (setsDone < (workout.exercises[i].sets || 1)) return i;
                     }
-                }
-
-                if (setIndex < (workout.exercises[firstExOfSuperset].sets || 1)) {
-                    setExIndex(firstExOfSuperset);
-                    setSetIndex(prev => prev + 1);
-                    startCountdown();
+                    
+                    let lastEx = exIndex;
+                    while (lastEx < workout.exercises.length - 1 && workout.exercises[lastEx + 1].supersetId === currentEx.supersetId) lastEx++;
+                    return lastEx + 1 < workout.exercises.length ? lastEx + 1 : -1;
                 } else {
-                    if (exIndex < workout.exercises.length - 1) {
-                        setExIndex(prev => prev + 1);
-                        setSetIndex(1);
-                        startCountdown();
-                    } else {
-                        finishWorkout();
-                    }
+                    if (setIndex < (currentEx.sets || 1)) return exIndex;
+                    return exIndex + 1 < workout.exercises.length ? exIndex + 1 : -1;
                 }
             };
 
-            // Навигация
+            const handleRestComplete = () => {
+                const nextIndex = findNextExercise();
+                if (nextIndex !== -1) {
+                    setExIndex(nextIndex);
+                    startCountdown();
+                } else finishWorkout();
+            };
+            
+            const handleTransitComplete = () => {
+                const nextIndex = findNextExercise();
+                if (nextIndex !== -1) {
+                    setExIndex(nextIndex);
+                    startCountdown();
+                } else finishWorkout();
+            };
+
             const handleNext = () => {
-                // Переключение на следующее УПРАЖНЕНИЕ
                 if (exIndex < workout.exercises.length - 1) {
                     setExIndex(prev => prev + 1);
-                    setSetIndex(1); // Сбрасываем на первый подход
-                    startCountdown(); // Начинаем с обратного отсчета
+                    startCountdown(); 
                 }
             };
 
             const handlePrevious = () => {
-                // Переключение на предыдущее УПРАЖНЕНИЕ
                 if (exIndex > 0) {
                     setExIndex(prev => prev - 1);
-                    setSetIndex(1); // Сбрасываем на первый подход
-                    startCountdown(); // Начинаем с обратного отсчета
+                    startCountdown();
                 }
             };
 
-
             const handleManualComplete = () => {
-                AudioEngine.playClick();
-                if (phase === 'work') {
-                    handleWorkComplete();
-                } else if (phase === 'rest') {
-                    handleRestComplete();
-                }
+                if (settings.audioMode !== 'silent') AudioEngine.playClick();
+                if (phase === 'work') handleWorkComplete();
+                else if (phase === 'rest') handleRestComplete();
+                else if (phase === 'transit') handleTransitComplete();
             };
 
             const finishWorkout = () => {
-                setPhase('complete');
-                AudioEngine.playComplete();
-                setCompletedSets(prev => {
-                    const isSaved = prev.some(s => s.exerciseId === exercise.id && s.setNumber === setIndex);
-                    const finalSets = isSaved ? prev : [...prev, { exerciseId: exercise.id, exerciseName: exercise.name, setNumber: setIndex, weight: actualWeight ? `${actualWeight}kg` : exercise.weight, reps: actualReps || String(exercise.reps).split('-')[0], type: exercise.type, timestamp: new Date().toISOString() }];
-                    onComplete({
-                        duration: Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000),
-                        sets: finalSets.length,
-                        completedSets: finalSets,
-                        workoutName: workout.scheduleName
-                    });
-                    return finalSets;
+setCompletedSets(prev => { 
+                let finalReps = actualReps;
+                if (exercise.type === 'time' && !actualReps) finalReps = phase === 'work' ? Math.max(0, parseInt(exercise.timer || 0) - timeLeft).toString() : exercise.timer;
+                else if (!actualReps) finalReps = String(exercise.reps).split('-')[0];
+                
+                const existingIdx = prev.findIndex(s => s.exerciseId === exercise.id && s.setNumber === setIndex);
+                const newSet = { exerciseId: exercise.id, exerciseName: exercise.name, setNumber: setIndex, weight: actualWeight ? `${actualWeight}kg` : exercise.weight, reps: finalReps, type: exercise.type, timestamp: new Date().toISOString() };
+                if (existingIdx !== -1) { const copy = [...prev]; copy[existingIdx] = newSet; return copy; }
+                return [...prev, newSet]; 
+            });
+                                setPhase('complete');
+                if (settings.audioMode !== 'silent') AudioEngine.playComplete();
+                onComplete({
+                    duration: Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000),
+                    sets: completedSets.length,
+                    completedSets,
+                    workoutName: workout.scheduleName
                 });
 
                 if (settings.enableVibration && 'vibrate' in navigator) {
@@ -1836,17 +1993,24 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
             };
 
             // Вспомогательные функции
-            const getButtonText = () => {
+            useEffect(() => {
+                if (!workout || phase === 'complete' || phase === 'init') return;
+                const draft = { workout, exIndex, completedSets, timestamp: Date.now(), startTime: startTimeRef.current };
+                localStorage.setItem('flexcode_draft', JSON.stringify(draft));
+            }, [workout, exIndex, completedSets, phase]);
+
+                        const getButtonText = () => {
                 if (phase === 'countdown') return 'Готовность...';
                 if (phase === 'work') return 'Завершить подход';
                 if (phase === 'rest') return 'Пропустить отдых';
+                if (phase === 'transit') return 'К снаряду!';
                 return 'Далее';
             };
 
             const togglePause = () => {
-                if (!isPaused) { pauseStartRef.current = Date.now(); } else if (pauseStartRef.current) { pausedTimeRef.current += Date.now() - pauseStartRef.current; pauseStartRef.current = null; }
+                                if (!isPaused) { pauseStartRef.current = Date.now(); } else if (pauseStartRef.current) { pausedTimeRef.current += Date.now() - pauseStartRef.current; pauseStartRef.current = null; }
                 setIsPaused(!isPaused);
-                AudioEngine.playClick();
+                if (settings.audioMode !== 'silent') AudioEngine.playClick();
             };
 
             // Рендер
@@ -1855,7 +2019,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                     {/* Верхняя панель с прогрессом */}
                     <div className="glass-header p-4">
                         <div className="flex items-center justify-between mb-3">
-                            <button onClick={onClose} className="p-2 bg-white/5 rounded-full hover:bg-white/10">
+                            <button onClick={() => { if(confirm('Завершить тренировку досрочно? Данные не сохранятся.')) { localStorage.removeItem('flexcode_draft'); onClose(); } }} className="p-2 bg-white/5 rounded-full hover:bg-white/10">
                                 <Icon name="chevron-down" size={20} />
                             </button>
                             <div className="text-center">
@@ -1991,22 +2155,22 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                             </div>
                         </div>
 
-                        {/* Таймер */}
+                                                {/* Таймер */}
                         <div className="relative z-0 mb-6">
-                            {phase === 'rest' ? (
+                            {phase === 'rest' || phase === 'transit' ? (
                                 <div className="text-center">
                                     <CircularTimer
-                                        progress={(timeLeft / (exercise.restAfter || 60)) * 100}
+                                                                                progress={(timeLeft / (phase === 'transit' ? 15 : (exercise.restAfter || 60))) * 100}
                                         timeString={formatTime(timeLeft)}
-                                        label="Отдых"
-                                        color="#10b981"
+                                        label={phase === 'transit' ? 'Суперсет' : 'Отдых'}
+                                        color={phase === 'transit' ? '#f59e0b' : '#10b981'}
                                         pulse={timeLeft <= 10}
                                         size={200}
                                     />
                                     {showRestAdvice && (
                                         <div className="mt-4 text-center">
-                                            <p className="text-lg text-emerald-400 font-medium">{showRestAdvice}</p>
-                                            {settings.showRestTime && (
+                                            <p className={`text-lg font-medium ${phase === 'transit' ? 'text-yellow-400' : 'text-emerald-400'}`}>{showRestAdvice}</p>
+                                            {settings.showRestTime && phase === 'rest' && (
                                                 <p className="text-sm text-gray-500 mt-1 mb-4">
                                                     Отдых: {exercise.restAfter || workout.globalRestTime} секунд
                                                 </p>
@@ -2054,10 +2218,33 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                                                             return newSets;
                                                         });
                                                     }}
-                                                    onClick={(e)=>e.target.select()}
+                                                                                                        onClick={(e)=>e.target.select()}
                                                 />
                                             </div>
                                         </div>
+
+                                        <div className="mt-4 pt-4 border-t border-white/10">
+                                            <label className="text-xs text-gray-400 uppercase font-bold mb-2 block text-center">Фактическое усилие (RPE)</label>
+                                            <div className="flex justify-center gap-2">
+                                                {[6, 7, 8, 9, 10].map(val => (
+                                                    <button 
+                                                        key={val} 
+                                                        onClick={() => {
+                                                            setActualRpe(val);
+                                                            setCompletedSets(prev => {
+                                                                const newSets = [...prev];
+                                                                if(newSets.length > 0) newSets[newSets.length - 1].rpe = val;
+                                                                return newSets;
+                                                            });
+                                                        }} 
+                                                        className={`w-10 h-10 rounded-full font-bold flex items-center justify-center transition-all ${actualRpe == val ? 'bg-red-500 text-white shadow-[0_0_10px_rgba(239,68,68,0.5)] scale-110' : 'bg-surface border border-white/10 text-gray-400'}`}
+                                                    >
+                                                        {val}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+
                                         <p className="text-[10px] text-gray-500 text-center mt-3 uppercase tracking-wider">Эти данные сохранятся в историю</p>
                                     </div>
                                 </div>
@@ -2156,10 +2343,23 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
         // 4. СТАТИСТИКА И АНАЛИТИКА
         const StatsDashboard = ({ history, programs }) => {
             const [timeRange, setTimeRange] = useState('week');
+            const [selectedExerciseId, setSelectedExerciseId] = useState('');
             const chartRef = useRef(null);
             const volumeChartRef = useRef(null);
                         const [chartInstance, setChartInstance] = useState(null);
             const [volumeChartInstance, setVolumeChartInstance] = useState(null);
+
+            const allExercises = useMemo(() => {
+                const map = new Map();
+                history.forEach(h => {
+                    if(h.completedSets) h.completedSets.forEach(s => map.set(s.exerciseName, s.exerciseName));
+                });
+                return Array.from(map.values()).sort();
+            }, [history]);
+            
+            useEffect(() => {
+                if(!selectedExerciseId && allExercises.length > 0) setSelectedExerciseId(allExercises[0]);
+            }, [allExercises, selectedExerciseId]);
 
             // Защита от пустого массива программ
             const safePrograms = programs || [];
@@ -2329,37 +2529,36 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                 const ctx = volumeChartRef.current.getContext('2d');
                 if (volumeChartInstance) volumeChartInstance.destroy();
 
-                // Последние 10 тренировок
-                const last10Workouts = [...history].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 10).reverse();
+                // Фильтруем историю по выбранному упражнению
+                const exHistory = history.filter(h => h.completedSets && h.completedSets.some(s => s.exerciseName === selectedExerciseId));
+                const last10Workouts = [...exHistory].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 10).reverse();
 
                 const labels = last10Workouts.map(h => new Date(h.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }));
                 const volumeData = last10Workouts.map(h => {
-                    const program = programs.find(p => p.scheduleName === h.programName);
-                    if (program && h.completedSets) {
-                        let volume = 0;
-                        h.completedSets.forEach(set => {
-                            const exercise = program.exercises.find(e => e.id === set.exerciseId);
-                            if (exercise) {
-                                volume += calculateTrainingVolume(exercise, set);
-                            }
-                        });
-                        return volume;
-                    }
-                    return 0;
+                    let max1RM = 0;
+                    h.completedSets.filter(s => s.exerciseName === selectedExerciseId && s.type !== 'time').forEach(set => {
+                        const w = parseFloat(String(set.weight).replace(/[^0-9.]/g, '')) || 0;
+                        const r = parseInt(String(set.reps).split('-')[0]) || 0;
+                        const e1rm = w * (1 + r / 30);
+                        if (e1rm > max1RM) max1RM = e1rm;
+                    });
+                    return Math.round(max1RM);
                 });
 
                 const chart = new Chart(ctx, {
-                    type: 'bar',
+                    type: 'line',
                     data: {
                         labels,
                         datasets: [{
-                            label: 'Тренировочный объем (кг)',
+                            label: 'Макс. e1RM (кг)',
                             data: volumeData,
-                            backgroundColor: 'rgba(139, 92, 246, 0.7)',
-                            borderColor: 'rgba(139, 92, 246, 1)',
-                            borderWidth: 1,
-                            borderRadius: 6,
-                            maxBarThickness: 40
+                            backgroundColor: 'rgba(234, 179, 8, 0.2)',
+                            borderColor: 'rgba(234, 179, 8, 1)',
+                            borderWidth: 2,
+                            pointBackgroundColor: '#eab308',
+                            pointRadius: 4,
+                            tension: 0.3,
+                            fill: true
                         }]
                     },
                     options: {
@@ -2424,7 +2623,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                             )}
                             <Icon name="flame" className="text-orange-500 mb-2" size={32} />
                             <span className="text-3xl font-bold text-white">{streak}</span>
-                            <span className="text-xs text-gray-400 uppercase tracking-wider">Стрик</span>
+                                                        <span className="text-xs text-gray-400 uppercase tracking-wider">Недель подряд</span>
                         </Card>
                     </div>
 
@@ -2472,12 +2671,18 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                         </div>
                     </Card>
 
-                    {/* График тренировочного объема */}
-                    <Card className="h-64 mb-6">
-                        <h3 className="text-white font-bold mb-4 flex items-center gap-2">
-                            <Icon name="weight" size={18} className="text-purple-400" />
-                            Объем за последние 10 тренировок
-                        </h3>
+                                        {/* График e1RM (Сила) */}
+                    <Card className="h-72 mb-6">
+                        <div className="flex justify-between items-start mb-1">
+                            <h3 className="text-white font-bold flex items-center gap-2">
+                                <Icon name="zap" size={18} className="text-yellow-500" />
+                                Динамика силы (Max e1RM)
+                            </h3>
+                            <select className="bg-dark border border-white/10 text-white text-xs rounded-lg p-1 outline-none max-w-[150px]" value={selectedExerciseId} onChange={e => setSelectedExerciseId(e.target.value)}>
+                                {allExercises.map(ex => <option key={ex} value={ex}>{ex}</option>)}
+                            </select>
+                        </div>
+                        <p className="text-[10px] text-gray-500 mb-4 uppercase tracking-wider">Оценка одноповторного максимума (Формула Эпли)</p>
                         <div className="h-48 relative">
                             {history.length > 0 ? (
                                 <canvas ref={volumeChartRef}></canvas>
@@ -2541,10 +2746,26 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
         };
 
         // 5. КОМПОНЕНТ РАСПИСАНИЯ
-        const ScheduleView = ({ programs, onSelectProgram, onDeleteProgram }) => {
+        const ScheduleView = ({ programs, onSelectProgram, onDeleteProgram, history = [] }) => {
             const currentDay = getCurrentDay();
-            const todayProgram = programs.find(p => p.dayOfWeek === currentDay);
-            const [selectedDay, setSelectedDay] = useState(currentDay);
+            
+            // Логика Циклического расписания
+            const isCyclic = programs.length > 0 && !programs.some(p => WEEK_DAYS.some(d => d.id === p.dayOfWeek));
+            let cyclicTodayId = null;
+            if (isCyclic) {
+                if (history.length > 0) {
+                    const lastProgId = history[history.length - 1].programId;
+                    const lastIdx = programs.findIndex(p => p.id === lastProgId);
+                    if (lastIdx !== -1) {
+                        cyclicTodayId = programs[(lastIdx + 1) % programs.length].dayOfWeek;
+                    }
+                }
+                if (!cyclicTodayId) cyclicTodayId = programs[0].dayOfWeek;
+            }
+
+            const activeCurrentDay = isCyclic ? cyclicTodayId : currentDay;
+            const todayProgram = programs.find(p => p.dayOfWeek === activeCurrentDay);
+            const [selectedDay, setSelectedDay] = useState(activeCurrentDay);
             const [showAddModal, setShowAddModal] = useState(false);
 
             // Группировка программ по дням
@@ -2626,9 +2847,10 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                     </Card>
 
                     {/* Программы выбранного дня */}
-                    <div className="mb-6">
-                        <h3 className="text-white font-bold mb-4">
-                            {selectedDay === currentDay ? 'Тренировка на сегодня' : `Тренировки на ${WEEK_DAYS.find(d => d.id === selectedDay)?.fullName}`}
+                                        <div className="mb-6">
+                        <h3 className="text-white font-bold mb-4 flex items-center gap-2">
+                            {selectedDay === activeCurrentDay ? '🔥 Тренировка на сегодня' : `Тренировки на ${WEEK_DAYS.find(d => d.id === selectedDay)?.fullName || selectedDay}`}
+                            {isCyclic && selectedDay === activeCurrentDay && <span className="text-[10px] bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full border border-blue-500/30 uppercase">Цикл</span>}
                         </h3>
 
                         {programsByDay[selectedDay]?.length > 0 ? (
@@ -2698,7 +2920,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
         // 6. ДЕТАЛЬНЫЙ ПРОСМОТР ПРОГРАММЫ
         const ProgramDetailView = ({ program, onClose, onStartWorkout, onEdit, reminders, setReminders }) => {
             const pendingPreWorkout = reminders?.filter(r => r.trigger === 'pre_workout' && r.lastCompleted !== new Date().toDateString()) || [];
-            const totalSets = program.exercises.reduce((acc, ex) => acc + (parseInt(ex.sets) || 1), 0);
+            const totalSets = program.exercises.reduce((acc, ex) => acc + (ex.sets || 1), 0);
                         const estimatedDuration = Math.round(program.exercises.reduce((acc, ex) =>
                 acc + (ex.sets * (ex.type === 'time' ? ex.timer : 45) + ex.sets * (ex.restAfter || program.globalRestTime || 60)), 0
             ) / 60);
@@ -2984,8 +3206,8 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
         };
 
         const App = () => {
-                                    const [workspaces, setWorkspaces] = useState(() => { const saved = localStorage.getItem('flexcode_workspaces'); return saved ? JSON.parse(saved) : [{ id: 'default', name: 'Основной профиль' }]; });
-            const [activeWorkspaceId, setActiveWorkspaceId] = useState(() => localStorage.getItem('flexcode_active_workspace') || 'default');
+                                                const [workspaces, setWorkspaces] = useState([{ id: 'default', name: 'Основной профиль' }]);
+            const [activeWorkspaceId, setActiveWorkspaceId] = useState('default');
             const [isWorkspaceManagerOpen, setIsWorkspaceManagerOpen] = useState(false);
             const [view, setView] = useState('schedule');
             const [programs, setPrograms] = useState([]);
@@ -2993,12 +3215,31 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
             const [history, setHistory] = useState([]);
             const [selectedProgram, setSelectedProgram] = useState(null);
             const [notifications, setNotifications] = useState([]);
-            const [settings, setSettings] = useState(() => { const saved = localStorage.getItem('flexcode_settings'); return saved ? JSON.parse(saved) : DEFAULT_SETTINGS.player; });
-            const [reminders, setReminders] = useState(() => { const saved = localStorage.getItem('flexcode_reminders'); return saved ? JSON.parse(saved) : []; });
+            const [settings, setSettings] = useState(DEFAULT_SETTINGS.player);
+            const [reminders, setReminders] = useState([]);
+            const [isAppInitialized, setIsAppInitialized] = useState(false);
             const [isEditorOpen, setIsEditorOpen] = useState(false);
             const [isAchievementsOpen, setIsAchievementsOpen] = useState(false);
             const [isLoading, setIsLoading] = useState(true);
             const [unlockedAchievements, setUnlockedAchievements] = useState([]);
+            const [draftChecked, setDraftChecked] = useState(false);
+            useEffect(() => {
+                if (isAppInitialized && !draftChecked && !isLoading) {
+                    setDraftChecked(true);
+                    const draftStr = localStorage.getItem('flexcode_draft');
+                    if (draftStr) {
+                        try {
+                            const draft = JSON.parse(draftStr);
+                            if (Date.now() - draft.timestamp < 12 * 60 * 60 * 1000) { 
+                                if (confirm('У вас есть незавершенная тренировка! Продолжить?')) {
+                                    setActiveWorkout(draft.workout);
+                                } else { localStorage.removeItem('flexcode_draft'); }
+                            } else { localStorage.removeItem('flexcode_draft'); }
+                        } catch (e) {}
+                    }
+                }
+            }, [isAppInitialized, isLoading, draftChecked]);
+
 
             const progressedPrograms = useMemo(() => {
                 if (isLoading) return [];
@@ -3039,41 +3280,55 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                 return () => clearInterval(interval);
             }, []);
 
+                        // Инициализация IndexedDB 1 раз
             useEffect(() => {
-                setIsLoading(true);
-                try {
-                    const suffix = activeWorkspaceId === 'default' ? '' : `_${activeWorkspaceId}`;
-                    const savedProgs = localStorage.getItem(`flexcode_programs${suffix}`);
-                    const savedHist = localStorage.getItem(`flexcode_history${suffix}`);
-                    const savedAchievements = localStorage.getItem(`flexcode_achievements${suffix}`);
+                const initApp = async () => {
+                    try {
+                        const w = await localforage.getItem('flexcode_workspaces');
+                        const a = await localforage.getItem('flexcode_active_workspace');
+                        const s = await localforage.getItem('flexcode_settings');
+                        if (w) setWorkspaces(w);
+                        if (a) setActiveWorkspaceId(a);
+                        if (s) setSettings(s);
+                    } catch(e) { console.error(e); } finally { setIsAppInitialized(true); }
+                };
+                initApp();
+            }, []);
 
-                    setPrograms(savedProgs ? JSON.parse(savedProgs) : DEFAULT_PROGRAM);
-                    setHistory(savedHist ? JSON.parse(savedHist) : []);
-                    setUnlockedAchievements(savedAchievements ? JSON.parse(savedAchievements) : []);
-                    
-                    // Обновляем текущий активный профиль в памяти
-                    localStorage.setItem('flexcode_active_workspace', activeWorkspaceId);
-                } catch (e) {
-                    console.error("Load failed", e);
-                } finally {
-                    setIsLoading(false);
-                }
-            }, [activeWorkspaceId]); // Перезагружаем ТОЛЬКО программы при смене профиля
-
-            // Сохранение данных (С учетом профилей)
+            // Загрузка данных профиля
             useEffect(() => {
-                if (!isLoading) {
+                if (!isAppInitialized) return;
+                const loadWorkspaceData = async () => {
+                    setIsLoading(true);
+                    try {
+                        const suffix = activeWorkspaceId === 'default' ? '' : `_${activeWorkspaceId}`;
+                        const p = await localforage.getItem(`flexcode_programs${suffix}`);
+                        const h = await localforage.getItem(`flexcode_history${suffix}`);
+                        const ach = await localforage.getItem(`flexcode_achievements${suffix}`);
+                        const r = await localforage.getItem(`flexcode_reminders${suffix}`);
+
+                        setPrograms(p || DEFAULT_PROGRAM);
+                        setHistory(h || []);
+                        setUnlockedAchievements(ach || []);
+                        setReminders(r || []);
+                        await localforage.setItem('flexcode_active_workspace', activeWorkspaceId);
+                    } catch (e) { console.error(e); } finally { setIsLoading(false); }
+                };
+                loadWorkspaceData();
+            }, [activeWorkspaceId, isAppInitialized]);
+
+            // Асинхронное сохранение (IndexedDB)
+            useEffect(() => {
+                if (!isLoading && isAppInitialized) {
                     const suffix = activeWorkspaceId === 'default' ? '' : `_${activeWorkspaceId}`;
-                    localStorage.setItem(`flexcode_programs${suffix}`, JSON.stringify(programs));
-                    localStorage.setItem(`flexcode_history${suffix}`, JSON.stringify(history));
-                    localStorage.setItem(`flexcode_achievements${suffix}`, JSON.stringify(unlockedAchievements));
-                    
-                    localStorage.setItem('flexcode_settings', JSON.stringify(settings));
-                    localStorage.setItem('flexcode_reminders', JSON.stringify(reminders));
-                    localStorage.setItem('flexcode_workspaces', JSON.stringify(workspaces));
-                    localStorage.setItem('flexcode_active_workspace', activeWorkspaceId);
+                    localforage.setItem(`flexcode_programs${suffix}`, programs);
+                    localforage.setItem(`flexcode_history${suffix}`, history);
+                    localforage.setItem(`flexcode_achievements${suffix}`, unlockedAchievements);
+                    localforage.setItem(`flexcode_reminders${suffix}`, reminders);
+                    localforage.setItem('flexcode_settings', settings);
+                    localforage.setItem('flexcode_workspaces', workspaces);
                 }
-            }, [programs, history, settings, unlockedAchievements, activeWorkspaceId, workspaces, isLoading]);
+            }, [programs, history, settings, unlockedAchievements, activeWorkspaceId, workspaces, isLoading, isAppInitialized]);
 
             // Управление профилями
             const handleCreateWorkspace = (name) => {
@@ -3085,10 +3340,13 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                 const updated = workspaces.filter(w => w.id !== id);
                 setWorkspaces(updated);
                 if (activeWorkspaceId === id) setActiveWorkspaceId(updated[0].id);
-                // Очистка памяти браузера
-                localStorage.removeItem(`flexcode_programs_${id}`);
-                localStorage.removeItem(`flexcode_history_${id}`);
-                localStorage.removeItem(`flexcode_achievements_${id}`);
+                                // Очистка IndexedDB
+                localforage.removeItem(`flexcode_programs_${id}`);
+                localforage.removeItem(`flexcode_history_${id}`);
+                localforage.removeItem(`flexcode_achievements_${id}`);
+                localforage.removeItem(`flexcode_reminders_${id}`);
+                setActiveWorkout(null);
+                localStorage.removeItem('flexcode_draft');
             };
             const handleRenameWorkspace = (id, newName) => {
                 setWorkspaces(workspaces.map(w => w.id === id ? { ...w, name: newName } : w));
@@ -3123,7 +3381,15 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                 addNotification('success', 'Программа сохранена', 'Все изменения успешно сохранены');
             };
 
-            const handleWorkoutComplete = (result) => {
+                        const handleWorkoutComplete = (result) => {
+                // Защита от мусорных мисскликов
+                if (result.duration < 60 || result.completedSets.length === 0) {
+                    if (!window.confirm('Тренировка слишком короткая или пустая. Сохранить её в историю? (Отмена = Удалить)')) {
+                        setActiveWorkout(null);
+                        return;
+                    }
+                }
+
                 const record = {
                     id: generateId(),
                     date: new Date().toISOString(),
@@ -3139,6 +3405,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                 handleNewAchievements(newAchievementIds);
 
                 setActiveWorkout(null);
+                localStorage.removeItem('flexcode_draft');
 
                 addNotification('success', 'Тренировка завершена', `Отличная работа!`);
                 
@@ -3170,6 +3437,16 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
 
             const handleDeleteProgram = (programId) => {
                 setPrograms(prev => prev.filter(p => p.id !== programId));
+                try {
+                    const draftStr = localStorage.getItem('flexcode_draft');
+                    if (draftStr) {
+                        const draft = JSON.parse(draftStr);
+                        if (draft && draft.workout && draft.workout.id === programId) {
+                            localStorage.removeItem('flexcode_draft');
+                            if (activeWorkout && activeWorkout.id === programId) setActiveWorkout(null);
+                        }
+                    }
+                } catch (e) {}
                 addNotification('info', 'Программа удалена', 'Программа была успешно удалена');
             };
 
@@ -3242,6 +3519,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                             {view === 'schedule' && (
                                 <ScheduleView
                                     programs={progressedPrograms}
+                                    history={history}
                                     onSelectProgram={(program) => {
                                         const progressedVersion = progressedPrograms.find(p => p.id === program.id);
                                         setSelectedProgram(progressedVersion || program);
@@ -3339,7 +3617,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                             <ProgramDetailView
                                 program={selectedProgram}
                                 onClose={() => setSelectedProgram(null)}
-                                onStartWorkout={setActiveWorkout}
+                                onStartWorkout={(workout) => { localStorage.removeItem('flexcode_draft'); setActiveWorkout(workout); }}
                                 reminders={reminders}
                                 setReminders={setReminders}
                                 onEdit={() => {
@@ -3352,7 +3630,8 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                         {activeWorkout && (
                             <WorkoutPlayer
                                 workout={activeWorkout}
-                                onClose={() => setActiveWorkout(null)}
+                                initialDraft={JSON.parse(localStorage.getItem('flexcode_draft') || 'null')}
+                                onClose={() => { setActiveWorkout(null); localStorage.removeItem('flexcode_draft'); }}
                                 onComplete={handleWorkoutComplete}
                                 settings={settings}
                                 onSettingsChange={handleSettingsChange}
@@ -3371,7 +3650,7 @@ if (!hasWorkout && i === 0) { currentDate.setDate(currentDate.getDate() - 1); co
                             onClose={() => setIsWorkspaceManagerOpen(false)}
                             workspaces={workspaces}
                             activeId={activeWorkspaceId}
-                            onSwitch={setActiveWorkspaceId}
+                            onSwitch={(id) => { setActiveWorkspaceId(id); setActiveWorkout(null); localStorage.removeItem('flexcode_draft'); }}
                             onCreate={handleCreateWorkspace}
                             onDelete={handleDeleteWorkspace}
                             onRename={handleRenameWorkspace}
