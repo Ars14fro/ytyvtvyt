@@ -1355,12 +1355,6 @@
                                         <span className="text-red-400 font-medium">RPE {exercise.rpe}</span>
                                     </div>
                                 )}
-                                {exercise.tempo && (
-                                    <div className="flex items-center gap-1 ml-2">
-                                        <Icon name="activity" size={14} className="text-blue-400" />
-                                        <span className="text-blue-400 font-medium">Темп {exercise.tempo}</span>
-                                    </div>
-                                )}
                             </div>
                         </div>
 
@@ -2024,9 +2018,6 @@ setCompletedSets(prev => {
                             </button>
                             <div className="text-center">
                                 <h2 className="font-bold text-white text-lg">{workout.scheduleName}</h2>
-                                <p className="text-xs text-gray-400">
-                                    Упражнение {exIndex + 1} из {totalExercises} • Подход {setIndex} из {totalSets}
-                                </p>
                             </div>
                             <div className="flex items-center gap-2">
                                 <button onClick={() => setShowSettings(true)} className="p-2 bg-white/5 rounded-full hover:bg-white/10">
@@ -2285,7 +2276,7 @@ setCompletedSets(prev => {
 
                     {/* Управление */}
                     <div className="p-6 bg-surface border-t border-white/5">
-                        <div className="flex items-center gap-3 mb-4">
+                        <div className="flex items-center gap-3">
                             <Button
                                 onClick={handlePrevious}
                                 variant="secondary"
@@ -2314,17 +2305,6 @@ setCompletedSets(prev => {
                             >
                                 Вперед
                             </Button>
-                        </div>
-
-                        <div className="flex justify-between text-xs text-gray-500">
-                            <span>
-                                Подход: {setIndex}/{totalSets} • {exercise.name}
-                            </span>
-                            {exIndex < workout.exercises.length - 1 && (
-                                <span>
-                                    Следующее: {workout.exercises[exIndex + 1].name}
-                                </span>
-                            )}
                         </div>
                     </div>
 
