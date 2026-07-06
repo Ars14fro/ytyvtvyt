@@ -1633,20 +1633,22 @@
             const [actualReps, setActualReps] = useState('');
             const [actualRpe, setActualRpe] = useState('');
             // States
-            const [exIndex, setExIndex] = useState(initialDraft ? initialDraft.exIndex : 0);
+                        const [exIndex, setExIndex] = useState(initialDraft && initialDraft.workout && initialDraft.workout.id === workout.id ? initialDraft.exIndex : 0);
             const [phase, setPhase] = useState('init');
             const [timeLeft, setTimeLeft] = useState(0);
             const [countdown, setCountdown] = useState(settings.countdownDuration);
             const [isPaused, setIsPaused] = useState(false);
             const [stats, setStats] = useState({ totalTime: 0, completedSets: 0 });
             const [showRestAdvice, setShowRestAdvice] = useState('');
-            const [completedSets, setCompletedSets] = useState(initialDraft ? initialDraft.completedSets : []);
+                        const [completedSets, setCompletedSets] = useState(initialDraft && initialDraft.workout && initialDraft.workout.id === workout.id ? initialDraft.completedSets : []);
             const [showSettings, setShowSettings] = useState(false);
 
             // Вычисляем setIndex строго ПОСЛЕ того, как объявлен completedSets
-            const setIndex = useMemo(() => {
+                        const setIndex = useMemo(() => {
                 if (!workout || !workout.exercises[exIndex] || !completedSets) return 1;
-                return completedSets.filter(s => s.exerciseId === workout.exercises[exIndex].id).length + 1;
+                const done = completedSets.filter(s => s.exerciseId === workout.exercises[exIndex].id).length;
+                const total = workout.exercises[exIndex].sets || 1;
+                return done < total ? done + 1 : total;
             }, [completedSets, exIndex, workout]);
 
             // Refs
@@ -1746,25 +1748,25 @@
             useEffect(() => {
                 if (isPaused || phase === 'complete' || phase === 'init') return;
 
-                const tick = () => {
-                    if (phase === 'countdown') {
-                        setCountdown(prev => {
-                                                        if (prev <= 1) {
-                                changePhase('work');
-                                return 0;
-                            }
-                            if (settings.audioMode !== 'silent') AudioEngine.playCountdown();
-                            return prev - 1;
-                        });
-                    } else if (phase === 'work' && exercise.type === 'time') {
-                        setTimeLeft(prev => {
-                            if (prev <= 1) {
-                                handleWorkComplete();
-                                return 0;
-                            }
-                            return prev - 1;
-                        });
-                    } else if (phase === 'rest') {
+                            const tick = () => {
+                if (phase === 'countdown') {
+                    setCountdown(prev => {
+                        if (prev <= 1) {
+                            setTimeout(() => changePhase('work'), 0);
+                            return 0;
+                        }
+                        if (settings.audioMode !== 'silent') AudioEngine.playCountdown();
+                        return prev - 1;
+                    });
+                } else if (phase === 'work' && exercise.type === 'time') {
+                    setTimeLeft(prev => {
+                        if (prev <= 1) {
+                            setTimeout(() => handleWorkComplete(), 0);
+                            return 0;
+                        }
+                        return prev - 1;
+                    });
+                } else if (phase === 'rest') {
                         const remain = Math.ceil((endTimeRef.current - Date.now()) / 1000);
                         if (remain <= 0) {
                             if (document.activeElement && document.activeElement.tagName === 'INPUT') {
@@ -1878,20 +1880,24 @@
                     return [...prev, newSet];
                 });
 
-                                                // Умный поиск следующего упражнения в суперсете
-                let nextExInSuperset = -1;
+                                                                let nextExInSuperset = -1;
                 if (currentEx.supersetId) {
-                    let firstEx = exIndex;
-                    while (firstEx > 0 && workout.exercises[firstEx - 1].supersetId === currentEx.supersetId) firstEx--;
-                    
-                    for (let i = firstEx; i < workout.exercises.length; i++) {
+                    for (let i = exIndex + 1; i < workout.exercises.length; i++) {
                         if (workout.exercises[i].supersetId !== currentEx.supersetId) break;
                         const setsDone = completedSets.filter(s => s.exerciseId === workout.exercises[i].id).length;
-                        // Добавили +1, потому что currentEx еще не прошел цикл рендера и completedSets обновится асинхронно
-                        const actualSetsDone = (i === exIndex) ? setsDone + 1 : setsDone;
-                        if (actualSetsDone < (workout.exercises[i].sets || 1)) {
-                            nextExInSuperset = i;
-                            break;
+                        if (setsDone < (workout.exercises[i].sets || 1)) {
+                            nextExInSuperset = i; break;
+                        }
+                    }
+                    if (nextExInSuperset === -1) {
+                        let firstEx = exIndex;
+                        while (firstEx > 0 && workout.exercises[firstEx - 1].supersetId === currentEx.supersetId) firstEx--;
+                        for (let i = firstEx; i <= exIndex; i++) {
+                            const setsDone = completedSets.filter(s => s.exerciseId === workout.exercises[i].id).length;
+                            const actualSetsDone = (i === exIndex) ? setsDone + 1 : setsDone;
+                            if (actualSetsDone < (workout.exercises[i].sets || 1)) {
+                                nextExInSuperset = i; break;
+                            }
                         }
                     }
                 }
@@ -1903,23 +1909,26 @@
                 }
             };
 
-            const findNextExercise = () => {
+                        const findNextExercise = () => {
                 const currentEx = workout.exercises[exIndex];
                 if (currentEx.supersetId) {
-                    let firstEx = exIndex;
-                    while (firstEx > 0 && workout.exercises[firstEx - 1].supersetId === currentEx.supersetId) firstEx--;
-                    
-                    for (let i = firstEx; i < workout.exercises.length; i++) {
+                    for (let i = exIndex + 1; i < workout.exercises.length; i++) {
                         if (workout.exercises[i].supersetId !== currentEx.supersetId) break;
                         const setsDone = completedSets.filter(s => s.exerciseId === workout.exercises[i].id).length;
                         if (setsDone < (workout.exercises[i].sets || 1)) return i;
                     }
-                    
+                    let firstEx = exIndex;
+                    while (firstEx > 0 && workout.exercises[firstEx - 1].supersetId === currentEx.supersetId) firstEx--;
+                    for (let i = firstEx; i <= exIndex; i++) {
+                        const setsDone = completedSets.filter(s => s.exerciseId === workout.exercises[i].id).length;
+                        if (setsDone < (workout.exercises[i].sets || 1)) return i;
+                    }
                     let lastEx = exIndex;
                     while (lastEx < workout.exercises.length - 1 && workout.exercises[lastEx + 1].supersetId === currentEx.supersetId) lastEx++;
                     return lastEx + 1 < workout.exercises.length ? lastEx + 1 : -1;
                 } else {
-                    if (setIndex < (currentEx.sets || 1)) return exIndex;
+                    const setsDone = completedSets.filter(s => s.exerciseId === currentEx.id).length;
+                    if (setsDone < (currentEx.sets || 1)) return exIndex;
                     return exIndex + 1 < workout.exercises.length ? exIndex + 1 : -1;
                 }
             };
@@ -1961,18 +1970,8 @@
                 else if (phase === 'transit') handleTransitComplete();
             };
 
-            const finishWorkout = () => {
-setCompletedSets(prev => { 
-                let finalReps = actualReps;
-                if (exercise.type === 'time' && !actualReps) finalReps = phase === 'work' ? Math.max(0, parseInt(exercise.timer || 0) - timeLeft).toString() : exercise.timer;
-                else if (!actualReps) finalReps = String(exercise.reps).split('-')[0];
-                
-                const existingIdx = prev.findIndex(s => s.exerciseId === exercise.id && s.setNumber === setIndex);
-                const newSet = { exerciseId: exercise.id, exerciseName: exercise.name, setNumber: setIndex, weight: actualWeight ? `${actualWeight}kg` : exercise.weight, reps: finalReps, type: exercise.type, timestamp: new Date().toISOString() };
-                if (existingIdx !== -1) { const copy = [...prev]; copy[existingIdx] = newSet; return copy; }
-                return [...prev, newSet]; 
-            });
-                                setPhase('complete');
+                        const finishWorkout = () => {
+                setPhase('complete');
                 if (settings.audioMode !== 'silent') AudioEngine.playComplete();
                 onComplete({
                     duration: Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000),
@@ -2275,36 +2274,31 @@ setCompletedSets(prev => {
                     </div>
 
                     {/* Управление */}
-                    <div className="p-6 bg-surface border-t border-white/5">
-                        <div className="flex items-center gap-3">
-                            <Button
+                                        <div className="p-4 sm:p-6 bg-surface border-t border-white/5">
+                        <div className="flex items-center gap-3 max-w-md mx-auto">
+                            <button
                                 onClick={handlePrevious}
-                                variant="secondary"
-                                className="flex-1"
-                                disabled={exIndex === 0 && setIndex === 1}
-                                icon="chevron-left"
+                                disabled={exIndex === 0}
+                                className="w-14 h-14 flex-shrink-0 flex items-center justify-center rounded-xl bg-surfaceLight/40 text-gray-400 hover:text-white hover:bg-surfaceLight disabled:opacity-30 transition-all active:scale-95 border border-white/5"
                             >
-                                Назад
-                            </Button>
+                                <Icon name="chevron-left" size={28} />
+                            </button>
 
                             <Button
                                 onClick={handleManualComplete}
-                                className="flex-2"
-                                variant={phase === 'rest' ? 'accent' : 'primary'}
-                                size="lg"
+                                className="flex-1 h-14 text-lg font-bold shadow-lg"
+                                variant={phase === 'rest' || phase === 'transit' ? 'accent' : 'primary'}
                             >
                                 {getButtonText()}
                             </Button>
 
-                            <Button
+                            <button
                                 onClick={handleNext}
-                                variant="secondary"
-                                className="flex-1"
-                                disabled={exIndex === workout.exercises.length - 1 && setIndex === totalSets}
-                                icon="chevron-right"
+                                disabled={exIndex === workout.exercises.length - 1}
+                                className="w-14 h-14 flex-shrink-0 flex items-center justify-center rounded-xl bg-surfaceLight/40 text-gray-400 hover:text-white hover:bg-surfaceLight disabled:opacity-30 transition-all active:scale-95 border border-white/5"
                             >
-                                Вперед
-                            </Button>
+                                <Icon name="chevron-right" size={28} />
+                            </button>
                         </div>
                     </div>
 
@@ -2465,15 +2459,17 @@ setCompletedSets(prev => {
                                     }
                                 }
                             },
-                            y: {
+                                                        y: {
                                 type: 'linear',
                                 display: true,
                                 position: 'left',
+                                suggestedMax: 5,
                                 grid: {
                                     color: 'rgba(255, 255, 255, 0.05)'
                                 },
                                 ticks: {
                                     color: '#94a3b8',
+                                    precision: 0,
                                     font: {
                                         family: "'Inter', sans-serif"
                                     }
@@ -2483,11 +2479,13 @@ setCompletedSets(prev => {
                                 type: 'linear',
                                 display: true,
                                 position: 'right',
+                                suggestedMax: 2,
                                 grid: {
                                     drawOnChartArea: false,
                                 },
                                 ticks: {
                                     color: '#10b981',
+                                    precision: 0,
                                     font: {
                                         family: "'Inter', sans-serif"
                                     }
@@ -2550,13 +2548,15 @@ setCompletedSets(prev => {
                             }
                         },
                         scales: {
-                            y: {
+                                                        y: {
                                 beginAtZero: true,
+                                suggestedMax: 20,
                                 grid: {
                                     color: 'rgba(255, 255, 255, 0.05)'
                                 },
                                 ticks: {
-                                    color: '#94a3b8'
+                                    color: '#94a3b8',
+                                    precision: 0
                                 }
                             },
                             x: {
